@@ -1,6 +1,11 @@
-// hooks/useTerminal.ts
+// src/hooks/useTerminalREST.ts
+/**
+ * Enhanced terminal hook using REST API with polling
+ * Replaces the WebSocket-based useTerminal hook
+ */
+
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { terminalAPI } from '@/lib/terminal-api';
 import type { 
   TerminalState, 
   TerminalOutputLine, 
@@ -15,6 +20,7 @@ export interface UseTerminalOptions {
   onConnect?: () => void;
   onDisconnect?: () => void;
   onError?: (error: string) => void;
+  pollInterval?: number; // milliseconds between polls (default: 1000)
 }
 
 export interface UseTerminalReturn {
@@ -63,28 +69,15 @@ const defaultConfig: TerminalConfig = {
   pasteWithMiddleClick: false
 };
 
-// ฟังก์ชันสำหรับสร้าง WebSocket URL ที่รองรับทั้ง localhost และ production domain
-function getWebSocketURL(): string {
-  if (typeof window === 'undefined') return '';
-  
-  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || window.location.origin;
-  const wsPath = process.env.NEXT_PUBLIC_WS_PATH || '/api/socket/io';
-  
-  console.log('WebSocket URL:', wsUrl);
-  console.log('WebSocket Path:', wsPath);
-  
-  return wsUrl;
-}
-
 export function useTerminal({ 
   serverId, 
   serverName, 
   config = {},
   onConnect,
   onDisconnect,
-  onError 
+  onError,
+  pollInterval = 1000
 }: UseTerminalOptions): UseTerminalReturn {
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [state, setState] = useState<TerminalState>({
     isConnected: false,
     isConnecting: false,
@@ -101,13 +94,12 @@ export function useTerminal({
   const [tabCompletions, setTabCompletions] = useState<string[]>([]);
   const [showCompletions, setShowCompletions] = useState(false);
   const [completionIndex, setCompletionIndex] = useState(-1);
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const configRef = useRef<TerminalConfig>({ ...defaultConfig, ...config });
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const lastOutputTimeRef = useRef<string>(new Date().toISOString());
 
   // Update config when it changes
   useEffect(() => {
@@ -149,216 +141,91 @@ export function useTerminal({
         output
       ]
     }));
+
+    lastOutputTimeRef.current = new Date().toISOString();
   }, []);
 
-  // Start heartbeat
-  const startHeartbeat = useCallback((socket: Socket) => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
+  /**
+   * Start polling for new output
+   */
+  const startPolling = useCallback((sessionId: string) => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
     }
 
-    heartbeatIntervalRef.current = setInterval(() => {
-      if (socket.connected) {
-        socket.emit('ping');
+    pollIntervalRef.current = setInterval(async () => {
+      if (!state.isConnected) return;
+
+      const result = await terminalAPI.pollOutput(sessionId, lastOutputTimeRef.current);
+      
+      if (result.success && result.data) {
+        const output = result.data;
+        
+        if (output.hasNewOutput) {
+          if (output.stdout) {
+            addOutput('output', output.stdout);
+          }
+          if (output.stderr) {
+            addOutput('error', output.stderr);
+          }
+          if (output.exitCode !== 0) {
+            addOutput('system', `Command exited with code: ${output.exitCode}`);
+          }
+
+          // Update current directory
+          if (output.currentDir) {
+            setState(prev => ({
+              ...prev,
+              currentDirectory: output.currentDir,
+              isCommandRunning: false
+            }));
+          }
+        }
       }
-    }, 25000);
-  }, []);
+    }, pollInterval);
+  }, [state.isConnected, addOutput, pollInterval]);
 
-  // Stop heartbeat
-  const stopHeartbeat = useCallback(() => {
-    if (heartbeatIntervalRef.current) {
-      clearInterval(heartbeatIntervalRef.current);
-      heartbeatIntervalRef.current = null;
-    }
-  }, []);
-
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (state.isConnecting || state.isConnected) return;
     
     setState(prev => ({ ...prev, isConnecting: true }));
     
-    const token = localStorage.getItem('auth_token');
-    if (!token) {
-      addOutput('error', 'Authentication token not found');
-      setState(prev => ({ ...prev, isConnecting: false }));
-      onError?.('Authentication token not found');
-      return;
-    }
-
-    // Clear any existing reconnection timeout
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-
-    const wsUrl = getWebSocketURL();
-    const wsPath = process.env.NEXT_PUBLIC_WS_PATH || '/api/socket/io';
+    const result = await terminalAPI.createSession(serverId);
     
-    console.log('Connecting to WebSocket:', wsUrl + wsPath);
-
-    // สร้าง Socket.IO connection
-    const socketOptions: any = {
-      auth: { token },
-      path: wsPath,
-      forceNew: true,
-      timeout: 20000,
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      maxReconnectionAttempts: 5,
-      randomizationFactor: 0.5,
-      transports: ['websocket', 'polling'],
-      upgrade: true,
-      rememberUpgrade: false,
-      pingTimeout: 60000,
-      pingInterval: 25000,
-    };
-
-    const newSocket = io(wsUrl, socketOptions);
-
-    // Connection events
-    newSocket.on('connect', () => {
-      console.log('✅ Socket.IO connected with transport:', newSocket.io.engine.transport.name);
-      setSocket(newSocket);
-      setReconnectAttempts(0);
-      startHeartbeat(newSocket);
-      newSocket.emit('terminal:connect', { serverId });
-    });
-
-    newSocket.on('connect_error', (error) => {
-      console.error('❌ Socket.IO connection error:', error);
-      const attempts = reconnectAttempts + 1;
-      setReconnectAttempts(attempts);
+    if (result.success && result.data) {
+      const session = result.data;
       
-      if (attempts >= 5) {
-        addOutput('error', 'Failed to connect after multiple attempts. Please check your internet connection.');
-        setState(prev => ({ ...prev, isConnecting: false }));
-        onError?.('Connection failed');
-        return;
-      }
-      
-      addOutput('system', `Connection attempt ${attempts}/5 failed. Retrying...`);
-    });
-
-    newSocket.on('disconnect', (reason) => {
-      console.log('🔌 Socket.IO disconnected:', reason);
-      stopHeartbeat();
-      setState(prev => ({
-        ...prev,
-        isConnected: false,
-        sessionId: null,
-        isCommandRunning: false
-      }));
-      addOutput('system', `Connection lost: ${reason}`);
-      onDisconnect?.();
-
-      // Auto-reconnect only for network issues
-      if (reason === 'io server disconnect' || reason === 'ping timeout' || reason === 'transport close') {
-        reconnectTimeoutRef.current = setTimeout(() => {
-          if (reconnectAttempts < 3) {
-            addOutput('system', 'Attempting to reconnect...');
-            connect();
-          }
-        }, 2000 + (reconnectAttempts * 1000));
-      }
-    });
-
-    newSocket.on('reconnect', (attemptNumber) => {
-      console.log('🔄 Socket.IO reconnected after', attemptNumber, 'attempts');
-      addOutput('system', 'Reconnected successfully');
-      setReconnectAttempts(0);
-    });
-
-    // Terminal events
-    newSocket.on('terminal:connected', (data: { 
-      sessionId: string; 
-      serverName: string; 
-      serverId: number;
-      currentDir?: string;
-    }) => {
       setState(prev => ({
         ...prev,
         isConnected: true,
         isConnecting: false,
-        sessionId: data.sessionId,
-        currentDirectory: data.currentDir || '/'
+        sessionId: session.sessionId,
+        currentDirectory: session.currentDir
       }));
-      
-      addOutput('system', `Connected to ${data.serverName}`);
+
+      addOutput('system', `Connected to ${session.serverName}`);
       addOutput('system', 'Enhanced SSH Terminal ready! Type your commands below.');
-      addOutput('system', `Working directory: ${data.currentDir || '/'}`);
+      addOutput('system', `Working directory: ${session.currentDir}`);
+      
+      // Start polling for output
+      startPolling(session.sessionId);
       
       onConnect?.();
-    });
-
-    newSocket.on('terminal:output', (data: {
-      sessionId: string;
-      command: string;
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-      currentDir: string;
-      timestamp: string;
-    }) => {
-      setState(prev => ({
-        ...prev,
-        isCommandRunning: false,
-        currentDirectory: data.currentDir || prev.currentDirectory
-      }));
-
-      if (data.stdout) {
-        addOutput('output', data.stdout);
-      }
-      if (data.stderr) {
-        addOutput('error', data.stderr);
-      }
-      
-      if (data.exitCode !== 0) {
-        addOutput('system', `Command exited with code: ${data.exitCode}`);
-      }
-    });
-
-    newSocket.on('terminal:tab-complete-result', (data: {
-      sessionId: string;
-      partial: string;
-      completions: string[];
-    }) => {
-      if (data.completions.length > 0) {
-        setTabCompletions(data.completions);
-        setShowCompletions(true);
-        setCompletionIndex(-1);
-      } else {
-        setShowCompletions(false);
-      }
-    });
-
-    newSocket.on('terminal:error', (data: { error: string; details?: string }) => {
-      addOutput('error', `Error: ${data.error}${data.details ? ` - ${data.details}` : ''}`);
-      setState(prev => ({ 
-        ...prev, 
-        isConnecting: false, 
-        isCommandRunning: false 
-      }));
-      onError?.(data.error);
-    });
-
-  }, [serverId, state.isConnecting, state.isConnected, addOutput, onConnect, onDisconnect, onError, reconnectAttempts, startHeartbeat, stopHeartbeat]);
-
-  const disconnect = useCallback(() => {
-    // Clear timeouts and intervals
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
+    } else {
+      addOutput('error', result.error || 'Failed to create session');
+      setState(prev => ({ ...prev, isConnecting: false }));
+      onError?.(result.error || 'Connection failed');
     }
-    stopHeartbeat();
+  }, [serverId, state.isConnecting, state.isConnected, addOutput, onConnect, onError, startPolling]);
 
-    if (socket) {
-      if (state.sessionId) {
-        socket.emit('terminal:disconnect', { sessionId: state.sessionId });
-      }
-      socket.disconnect();
-      setSocket(null);
+  const disconnect = useCallback(async () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+
+    if (state.sessionId) {
+      await terminalAPI.closeSession(state.sessionId);
     }
     
     setState(prev => ({
@@ -369,11 +236,11 @@ export function useTerminal({
       isCommandRunning: false
     }));
 
-    setReconnectAttempts(0);
-  }, [socket, state.sessionId, stopHeartbeat]);
+    onDisconnect?.();
+  }, [state.sessionId, onDisconnect]);
 
-  const executeCommand = useCallback((command: string) => {
-    if (!command.trim() || !socket || !state.sessionId || state.isCommandRunning) return;
+  const executeCommand = useCallback(async (command: string) => {
+    if (!command.trim() || !state.sessionId || state.isCommandRunning) return;
 
     setState(prev => ({ 
       ...prev, 
@@ -392,13 +259,15 @@ export function useTerminal({
     addOutput('input', `${prompt}${command}`);
 
     // Send command to server
-    socket.emit('terminal:command', {
-      sessionId: state.sessionId,
-      command: command.trim()
-    });
+    const result = await terminalAPI.executeCommand(state.sessionId, command.trim());
+
+    if (!result.success) {
+      addOutput('error', result.error || 'Failed to execute command');
+      setState(prev => ({ ...prev, isCommandRunning: false }));
+    }
 
     setCurrentCommand('');
-  }, [socket, state.sessionId, state.isCommandRunning, addOutput]);
+  }, [state.sessionId, state.isCommandRunning, addOutput]);
 
   const clearTerminal = useCallback(() => {
     setState(prev => ({ ...prev, outputs: [] }));
@@ -433,20 +302,26 @@ export function useTerminal({
     });
   }, []);
 
-  const requestTabCompletion = useCallback(() => {
-    if (!configRef.current.tabCompletion || !socket || !state.sessionId || state.isCommandRunning) return;
+  const requestTabCompletion = useCallback(async () => {
+    if (!configRef.current.tabCompletion || !state.sessionId || state.isCommandRunning) return;
 
     const words = currentCommand.split(' ');
     const lastWord = words[words.length - 1] || '';
     
     if (lastWord.length > 0) {
-      socket.emit('terminal:tab-complete', {
-        sessionId: state.sessionId,
-        partial: lastWord,
-        currentDir: state.currentDirectory
-      });
+      const result = await terminalAPI.getCompletions(
+        state.sessionId,
+        lastWord,
+        state.currentDirectory
+      );
+
+      if (result.success && result.data) {
+        setTabCompletions(result.data.completions);
+        setShowCompletions(result.data.completions.length > 0);
+        setCompletionIndex(-1);
+      }
     }
-  }, [socket, state.sessionId, state.isCommandRunning, state.currentDirectory, currentCommand]);
+  }, [state.sessionId, state.isCommandRunning, state.currentDirectory, currentCommand]);
 
   const applyCompletion = useCallback((completion: string) => {
     const words = currentCommand.split(' ');
@@ -513,18 +388,6 @@ export function useTerminal({
         requestTabCompletion();
         break;
         
-      case 'c':
-        if (e.ctrlKey) {
-          e.preventDefault();
-          if (state.isCommandRunning && socket && state.sessionId) {
-            socket.emit('terminal:command', {
-              sessionId: state.sessionId,
-              command: '\x03' // Ctrl+C character
-            });
-          }
-        }
-        break;
-        
       default:
         if (showCompletions && e.key !== 'Tab') {
           setShowCompletions(false);
@@ -540,9 +403,7 @@ export function useTerminal({
     executeCommand,
     navigateHistory,
     requestTabCompletion,
-    applyCompletion,
-    socket,
-    state.sessionId
+    applyCompletion
   ]);
 
   const copyToClipboard = useCallback(async (text: string) => {
@@ -555,20 +416,18 @@ export function useTerminal({
   }, [addOutput]);
 
   const validateCommand = useCallback((command: string): CommandValidation => {
-    // Basic validation
     const trimmedCommand = command.trim();
     
     if (!trimmedCommand) {
       return { allowed: false, dangerous: false, requiresConfirmation: false };
     }
 
-    // Check for dangerous commands
     const dangerousPatterns = [
       /rm\s+-rf\s+\/\s*$/,
       /rm\s+-rf\s+\*\s*$/,
       /mkfs/,
       /dd\s+if=\/dev\/zero/,
-      /:\(\)\{\s*:\|\:&\s*\};\:/  // fork bomb
+      /:\(\)\{\s*:\|\:&\s*\};\:/
     ];
 
     const isDangerous = dangerousPatterns.some(pattern => pattern.test(trimmedCommand));
@@ -582,7 +441,6 @@ export function useTerminal({
       };
     }
 
-    // Check for sudo commands
     if (trimmedCommand.startsWith('sudo ')) {
       return {
         allowed: true,
