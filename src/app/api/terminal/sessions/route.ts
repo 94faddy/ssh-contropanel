@@ -1,8 +1,8 @@
-// src/app/api/terminal/sessions/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { getUserFromToken } from '@/lib/auth';
-import { createShellSession, getShellSessionInfo } from '@/lib/ssh';
+import { withAuth } from '@/lib/auth';
+import { createShellSession, getShellSessionInfo, closeShellSession, executeShellCommand } from '@/lib/ssh';
 import { prisma } from '@/lib/database';
+import type { User, ApiResponse } from '@/types';
 
 // Store active terminal sessions (in production, use Redis)
 const terminalSessions = new Map<string, {
@@ -14,47 +14,73 @@ const terminalSessions = new Map<string, {
   outputs: Array<{ type: string; content: string; timestamp: Date }>;
 }>();
 
-export async function POST(request: NextRequest) {
+// POST - Create new terminal session
+export const POST = withAuth(async (request: NextRequest & { user: User }) => {
   try {
-    const token = request.headers.get('authorization')?.replace('Bearer ', '');
-    if (!token) {
+    const body = await request.json();
+    const { serverId } = body;
+
+    // Validate input
+    if (!serverId || typeof serverId !== 'number') {
       return NextResponse.json(
-        { success: false, error: 'No token provided' },
-        { status: 401 }
+        { success: false, error: 'Invalid serverId provided' },
+        { status: 400 }
       );
     }
-
-    const user = await getUserFromToken(token);
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: 'Invalid token' },
-        { status: 401 }
-      );
-    }
-
-    const { serverId } = await request.json();
 
     // Check server access
     const server = await prisma.server.findUnique({
-      where: { id: serverId }
+      where: { id: serverId },
+      select: {
+        id: true,
+        name: true,
+        host: true,
+        port: true,
+        username: true,
+        password: true,
+        userId: true,
+        status: true
+      }
     });
 
-    if (!server || (server.userId !== user.id && user.role !== 'ADMIN')) {
+    if (!server) {
       return NextResponse.json(
-        { success: false, error: 'Access denied' },
+        { success: false, error: `Server with id ${serverId} not found` },
+        { status: 404 }
+      );
+    }
+
+    if (server.userId !== request.user.id && request.user.role !== 'ADMIN') {
+      return NextResponse.json(
+        { success: false, error: 'Access denied to this server' },
         { status: 403 }
       );
     }
 
+    // Check if server is active
+    if (!server.password) {
+      return NextResponse.json(
+        { success: false, error: 'Server credentials are incomplete' },
+        { status: 400 }
+      );
+    }
+
     // Create shell session
-    const sessionId = `${user.id}-${serverId}-${Date.now()}`;
+    const sessionId = `${request.user.id}-${serverId}-${Date.now()}`;
     const shellSessionId = `shell-${sessionId}`;
 
-    const created = await createShellSession(serverId, user.id, shellSessionId);
+    console.log(`[Terminal] Creating shell session for server ${serverId}`, {
+      sessionId,
+      shellSessionId,
+      serverName: server.name,
+      serverHost: server.host
+    });
+
+    const created = await createShellSession(serverId, request.user.id, shellSessionId);
     
     if (!created) {
       return NextResponse.json(
-        { success: false, error: 'Failed to create shell session' },
+        { success: false, error: 'Failed to create SSH connection to server' },
         { status: 500 }
       );
     }
@@ -64,7 +90,7 @@ export async function POST(request: NextRequest) {
 
     // Store session
     terminalSessions.set(sessionId, {
-      userId: user.id,
+      userId: request.user.id,
       serverId,
       shellSessionId,
       isActive: true,
@@ -92,29 +118,13 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
-}
+});
 
-// GET all sessions for user
-export async function GET(request: NextRequest) {
+// GET - Get all sessions for user
+export const GET = withAuth(async (request: NextRequest & { user: User }) => {
   try {
-    const token = request.headers.get('authorization')?.replace('Bearer ', '');
-    if (!token) {
-      return NextResponse.json(
-        { success: false, error: 'No token provided' },
-        { status: 401 }
-      );
-    }
-
-    const user = await getUserFromToken(token);
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: 'Invalid token' },
-        { status: 401 }
-      );
-    }
-
     const userSessions = Array.from(terminalSessions.entries())
-      .filter(([, session]) => session.userId === user.id)
+      .filter(([, session]) => session.userId === request.user.id)
       .map(([sessionId, session]) => ({
         sessionId,
         serverId: session.serverId,
@@ -135,20 +145,6 @@ export async function GET(request: NextRequest) {
       { status: 500 }
     );
   }
-}
+});
 
-// Cleanup sessions globally (call periodically)
-export function cleanupTerminalSessions() {
-  const now = new Date();
-  const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
-
-  for (const [sessionId, session] of terminalSessions.entries()) {
-    if (session.lastActivity < fiveMinutesAgo) {
-      session.isActive = false;
-      terminalSessions.delete(sessionId);
-    }
-  }
-}
-
-// Export for use in command route
 export { terminalSessions };

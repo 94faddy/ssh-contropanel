@@ -21,18 +21,6 @@ function getConnectionKey(serverId: number, userId: number): string {
   return `${serverId}-${userId}`;
 }
 
-// Encrypt password for storage
-export async function encryptPassword(password: string): Promise<string> {
-  return bcrypt.hash(password, 12);
-}
-
-// Decrypt password (in real implementation, use proper encryption)
-export async function decryptPassword(encrypted: string, original?: string): Promise<string> {
-  // In production, implement proper decryption
-  // For now, we'll assume the password is stored encrypted with bcrypt
-  return original || encrypted;
-}
-
 // Test SSH connection
 export async function testSSHConnection(
   host: string,
@@ -109,11 +97,13 @@ export async function getSSHConnection(
 
     const ssh = new NodeSSH();
     
+    console.log(`[SSH] Connecting to ${server.host}:${server.port} as ${server.username}...`);
+
     await ssh.connect({
       host: server.host,
       port: server.port,
       username: server.username,
-      password: server.password, // In production, decrypt this
+      password: server.password,
       readyTimeout: 15000,
       algorithms: {
         kex: ['diffie-hellman-group14-sha256', 'diffie-hellman-group14-sha1'],
@@ -122,6 +112,8 @@ export async function getSSHConnection(
         serverHostKey: ['ssh-rsa', 'ssh-ed25519']
       }
     });
+
+    console.log(`[SSH] Connected to server ${serverId}`);
 
     // Store connection
     sshConnections.set(connectionKey, ssh);
@@ -146,13 +138,13 @@ export async function getSSHConnection(
         status: 'ERROR',
         lastChecked: new Date(),
       },
-    });
+    }).catch(err => console.error('Failed to update server status:', err));
 
     return null;
   }
 }
 
-// Create shell session
+// Create shell session - SIMPLIFIED VERSION
 export async function createShellSession(
   serverId: number,
   userId: number,
@@ -160,34 +152,40 @@ export async function createShellSession(
 ): Promise<boolean> {
   try {
     const ssh = await getSSHConnection(serverId, userId);
-    if (!ssh) return false;
+    if (!ssh) {
+      console.error(`[SSH] Failed to get SSH connection for server ${serverId}`);
+      return false;
+    }
 
-    // Get initial working directory and environment with proper TERM setting
-    const [pwdResult, envResult] = await Promise.all([
-      ssh.execCommand('pwd'),
-      ssh.execCommand('echo "TERM=${TERM:-xterm-256color}"; env')
-    ]);
+    console.log(`[SSH] Got SSH connection for server ${serverId}`);
 
-    const cwd = pwdResult.stdout.trim() || '/';
+    // Get initial working directory (single command, not Promise.all)
+    let cwd = '/root';
+    try {
+      const pwdResult = await ssh.execCommand('pwd', [], {
+        execOptions: { timeout: 5000 }
+      });
+      if (pwdResult.code === 0) {
+        cwd = pwdResult.stdout.trim() || '/root';
+        console.log(`[SSH] Current directory: ${cwd}`);
+      } else {
+        console.warn(`[SSH] pwd command failed with code ${pwdResult.code}`);
+      }
+    } catch (pwdError) {
+      console.warn(`[SSH] Failed to get pwd:`, pwdError);
+      cwd = '/root';
+    }
+
+    // Set up environment
     const env: Record<string, string> = {
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       LANG: 'en_US.UTF-8',
       LC_ALL: 'en_US.UTF-8',
-      DEBIAN_FRONTEND: 'noninteractive' // Prevent interactive prompts
+      DEBIAN_FRONTEND: 'noninteractive'
     };
-    
-    // Parse environment variables and merge with defaults
-    envResult.stdout.split('\n').forEach(line => {
-      const [key, ...valueParts] = line.split('=');
-      if (key && valueParts.length > 0) {
-        env[key] = valueParts.join('=');
-      }
-    });
 
-    // Ensure TERM is always set
-    env.TERM = env.TERM || 'xterm-256color';
-    env.DEBIAN_FRONTEND = 'noninteractive';
+    console.log(`[SSH] Creating shell session with cwd=${cwd}`);
 
     // Store shell session
     shellSessions.set(sessionId, {
@@ -198,9 +196,10 @@ export async function createShellSession(
       serverId
     });
 
+    console.log(`[SSH] Shell session stored: sessionId=${sessionId}`);
     return true;
   } catch (error) {
-    console.error('Failed to create shell session:', error);
+    console.error('[SSH] Failed to create shell session:', error);
     return false;
   }
 }
@@ -285,22 +284,6 @@ export async function executeShellCommand(
     const processedStdout = postprocessOutput(result.stdout, command);
     const processedStderr = postprocessOutput(result.stderr, command);
 
-    // Log command execution
-    await prisma.serverLog.create({
-      data: {
-        serverId: session.serverId,
-        logType: 'COMMAND',
-        message: `Executed: ${command}`,
-        data: {
-          command,
-          exitCode: result.code,
-          stdout: processedStdout,
-          stderr: processedStderr,
-          cwd: session.cwd
-        },
-      },
-    });
-
     return {
       stdout: processedStdout,
       stderr: processedStderr,
@@ -308,20 +291,6 @@ export async function executeShellCommand(
       cwd: session.cwd
     };
   } catch (error) {
-    // Log error
-    await prisma.serverLog.create({
-      data: {
-        serverId: session.serverId,
-        logType: 'ERROR',
-        message: `Command failed: ${command}`,
-        data: {
-          command,
-          error: error instanceof Error ? error.message : 'Unknown error',
-          cwd: session.cwd
-        },
-      },
-    });
-
     throw error;
   }
 }
@@ -425,7 +394,7 @@ export async function closeSSHConnection(serverId: number, userId: number): Prom
       status: 'DISCONNECTED',
       lastChecked: new Date(),
     },
-  });
+  }).catch(err => console.error('Failed to update server status:', err));
 }
 
 // Execute command on server (legacy function for backward compatibility)
@@ -462,59 +431,31 @@ export async function executeCommand(
     const processedStdout = postprocessOutput(result.stdout, command);
     const processedStderr = postprocessOutput(result.stderr, command);
 
-    // Log command execution
-    await prisma.serverLog.create({
-      data: {
-        serverId,
-        logType: 'COMMAND',
-        message: `Executed: ${command}`,
-        data: {
-          command,
-          exitCode: result.code,
-          stdout: processedStdout,
-          stderr: processedStderr,
-        },
-      },
-    });
-
     return {
       ...result,
       stdout: processedStdout,
       stderr: processedStderr
     };
   } catch (error) {
-    // Log error
-    await prisma.serverLog.create({
-      data: {
-        serverId,
-        logType: 'ERROR',
-        message: `Command failed: ${command}`,
-        data: {
-          command,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        },
-      },
-    });
-
     throw error;
   }
 }
 
-// Get system information - ใช้คำสั่งง่าย ๆ เหมือนที่คุณเช็ค
+// Get system information
 export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
   try {
     const [
       osInfo,
       uptime,
       loadAvg,
-      memoryInfo,  // ใช้คำสั่งเดียวกับที่คุณเช็ค
+      memoryInfo,
       cpuInfo,
       diskInfo
     ] = await Promise.all([
       ssh.execCommand('uname -s -r -m'),
       ssh.execCommand('uptime -s && uptime'),
       ssh.execCommand('cat /proc/loadavg'),
-      ssh.execCommand('free | awk \'/Mem:/ {print $2, $7}\''), // total, available
+      ssh.execCommand('free | awk \'/Mem:/ {print $2, $7}\''),
       ssh.execCommand('nproc'),
       ssh.execCommand('df -h --type=ext4 --type=ext3 --type=ext2 --type=xfs')
     ]);
@@ -537,15 +478,15 @@ export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
       parseFloat(loadData[2]) || 0
     ];
 
-    // Parse memory info - ใช้วิธีง่าย ๆ ตรงกับที่คุณเช็ค
+    // Parse memory info
     let totalMemory = 0;
     let availableMemory = 0;
     
     if (memoryInfo.stdout) {
       const memData = memoryInfo.stdout.trim().split(' ');
       if (memData.length >= 2) {
-        totalMemory = parseInt(memData[0]) * 1024;      // total (KB -> bytes)
-        availableMemory = parseInt(memData[1]) * 1024;  // available (KB -> bytes)
+        totalMemory = parseInt(memData[0]) * 1024;
+        availableMemory = parseInt(memData[1]) * 1024;
       }
     }
 
@@ -555,7 +496,6 @@ export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
     // Parse disk usage
     const diskUsage = parseDiskUsage(diskInfo.stdout);
 
-    // ส่งข้อมูลที่ถูกต้อง - ใช้ available เป็น freeMemory
     return {
       os,
       arch,
@@ -563,7 +503,7 @@ export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
       uptime: uptimeSeconds,
       loadAverage,
       totalMemory,
-      freeMemory: availableMemory, // ใช้ available memory
+      freeMemory: availableMemory,
       cpuCount,
       diskUsage
     };
@@ -588,17 +528,11 @@ function parseUptimeFromString(uptimeStr: string): number {
   // Parse hours and minutes
   const timeMatch = uptimeText.match(/(\d+):(\d+)/);
   if (timeMatch) {
-    seconds += parseInt(timeMatch[1]) * 3600; // hours
-    seconds += parseInt(timeMatch[2]) * 60;   // minutes
+    seconds += parseInt(timeMatch[1]) * 3600;
+    seconds += parseInt(timeMatch[2]) * 60;
   }
 
   return seconds;
-}
-
-// Helper function to parse memory line
-function parseMemoryLine(line: string): number {
-  const match = line.match(/(\d+)\s+kB/);
-  return match ? parseInt(match[1]) : 0;
 }
 
 // Helper function to parse disk usage
@@ -648,7 +582,6 @@ export async function updateServerSystemInfo(serverId: number, userId: number): 
 
 // Cleanup inactive connections
 export function cleanupSSHConnections(): void {
-  // This should be called periodically to clean up inactive connections
   console.log(`Cleaning up SSH connections. Active: ${sshConnections.size}`);
   console.log(`Active shell sessions: ${shellSessions.size}`);
 }

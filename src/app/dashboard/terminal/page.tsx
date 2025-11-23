@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Layout from '@/components/Layout';
 import TerminalREST from '@/components/TerminalREST';
-import type { Server } from '@/types';
+import type { Server, ApiResponse } from '@/types';
 
 export default function TerminalPage() {
   const searchParams = useSearchParams();
@@ -29,7 +29,7 @@ export default function TerminalPage() {
       });
 
       if (response.ok) {
-        const data = await response.json();
+        const data: ApiResponse<Server> = await response.json();
         if (data.success) {
           setServer(data.data);
           setShowTerminal(true);

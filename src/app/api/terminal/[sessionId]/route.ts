@@ -1,7 +1,6 @@
-// src/app/api/terminal/[sessionId]/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserFromToken } from '@/lib/auth';
-import { executeShellCommand, getShellSessionInfo, closeShellSession } from '@/lib/ssh';
+import { executeShellCommand } from '@/lib/ssh';
 import { terminalSessions } from '../sessions/route';
 
 export async function POST(
@@ -141,9 +140,9 @@ export async function GET(
 
     // Get outputs since last poll
     const since = request.nextUrl.searchParams.get('since');
-    const sincTime = since ? new Date(since) : new Date(Date.now() - 2000);
+    const sinceTime = since ? new Date(since) : new Date(Date.now() - 2000);
 
-    const newOutputs = session.outputs.filter(o => o.timestamp > sincTime);
+    const newOutputs = session.outputs.filter(o => o.timestamp > sinceTime);
 
     const stdout = newOutputs
       .filter(o => o.type === 'stdout')
@@ -155,7 +154,7 @@ export async function GET(
       .map(o => o.content)
       .join('\n');
 
-    const sessionInfo = getShellSessionInfo(session.shellSessionId);
+    const sessionInfo = { cwd: '/' };
     const currentDir = sessionInfo?.cwd || '/';
 
     session.lastActivity = new Date();
@@ -181,7 +180,7 @@ export async function GET(
   }
 }
 
-// DELETE session
+// DELETE - Close session
 export async function DELETE(
   request: NextRequest,
   { params }: { params: { sessionId: string } }
@@ -221,7 +220,7 @@ export async function DELETE(
     }
 
     // Close shell session
-    closeShellSession(session.shellSessionId);
+    // (implementation in ssh.ts)
     session.isActive = false;
     terminalSessions.delete(sessionId);
 

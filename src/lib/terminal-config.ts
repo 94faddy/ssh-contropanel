@@ -161,8 +161,17 @@ export class TerminalConfigManager {
     this.securityPolicy = this.loadSecurityPolicy();
   }
 
+  // Check if we're in browser environment
+  private isClient(): boolean {
+    return typeof window !== 'undefined' && typeof localStorage !== 'undefined';
+  }
+
   // Load configuration from localStorage
   private loadConfig(): TerminalConfig {
+    if (!this.isClient()) {
+      return { ...DEFAULT_TERMINAL_CONFIG };
+    }
+
     try {
       const stored = localStorage.getItem(TerminalConfigManager.STORAGE_KEY);
       if (stored) {
@@ -177,6 +186,10 @@ export class TerminalConfigManager {
 
   // Load security policy from localStorage
   private loadSecurityPolicy(): SecurityPolicy {
+    if (!this.isClient()) {
+      return { ...DEFAULT_SECURITY_POLICY };
+    }
+
     try {
       const stored = localStorage.getItem(TerminalConfigManager.SECURITY_POLICY_KEY);
       if (stored) {
@@ -191,6 +204,10 @@ export class TerminalConfigManager {
 
   // Save configuration to localStorage
   private saveConfig(): void {
+    if (!this.isClient()) {
+      return;
+    }
+
     try {
       localStorage.setItem(
         TerminalConfigManager.STORAGE_KEY, 
@@ -203,6 +220,10 @@ export class TerminalConfigManager {
 
   // Save security policy to localStorage
   private saveSecurityPolicy(): void {
+    if (!this.isClient()) {
+      return;
+    }
+
     try {
       localStorage.setItem(
         TerminalConfigManager.SECURITY_POLICY_KEY, 
@@ -383,142 +404,3 @@ export function validateTerminalConfig(config: Partial<TerminalConfig>): string[
   
   return errors;
 }
-
-// Keyboard shortcuts configuration
-export const TERMINAL_SHORTCUTS = {
-  copy: { key: 'c', ctrl: true, shift: true },
-  paste: { key: 'v', ctrl: true, shift: true },
-  clear: { key: 'l', ctrl: true },
-  interrupt: { key: 'c', ctrl: true },
-  eof: { key: 'd', ctrl: true },
-  search: { key: 'f', ctrl: true },
-  increaseFontSize: { key: '=', ctrl: true },
-  decreaseFontSize: { key: '-', ctrl: true },
-  resetFontSize: { key: '0', ctrl: true },
-  newTab: { key: 't', ctrl: true, shift: true },
-  closeTab: { key: 'w', ctrl: true, shift: true },
-  switchTab: { key: 'Tab', ctrl: true },
-  fullscreen: { key: 'F11' }
-};
-
-// Command aliases
-export const COMMAND_ALIASES = {
-  'll': 'ls -la',
-  'la': 'ls -la',
-  'l': 'ls -CF',
-  '..': 'cd ..',
-  '...': 'cd ../..',
-  'cd-': 'cd -',
-  'h': 'history',
-  'c': 'clear',
-  'x': 'exit',
-  'q': 'exit',
-  'vi': 'vim',
-  'py': 'python3',
-  'node': 'nodejs',
-  
-  // เพิ่มคำสั่งใหม่ที่นี่
-  'mylog': 'tail -f /var/log/myapp.log',
-  'status': 'systemctl status',
-  'restart': 'sudo systemctl restart',
-  'start': 'sudo systemctl start',
-  'stop': 'sudo systemctl stop',
-  'ports': 'netstat -tulpn',
-  'disk': 'df -h',
-  'mem': 'free -h',
-  'cpu': 'htop',
-  'proc': 'ps aux | grep',
-  'mydir': 'cd /var/www/html',
-  'logs': 'cd /var/log',
-  'config': 'cd /etc',
-  'backup': 'rsync -av --progress',
-  'extract': 'tar -xzf',
-  'compress': 'tar -czf',
-  'update': 'sudo apt update && sudo apt upgrade',
-  'install': 'sudo apt install',
-  'search': 'apt search',
-  'weather': 'curl wttr.in',
-  'myip': 'curl ifconfig.me',
-  'speed': 'speedtest-cli'
-};
-
-// Environment setup commands
-export const ENVIRONMENT_SETUP = {
-  bash: [
-    'export PS1="\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ "',
-    'export TERM=xterm-256color',
-    'export LANG=en_US.UTF-8',
-    'alias ll="ls -la"',
-    'alias la="ls -la"',
-    'alias l="ls -CF"'
-  ],
-  zsh: [
-    'export PS1="%{$fg[green]%}%n@%m%{$reset_color%}:%{$fg[blue]%}%~%{$reset_color%}$ "',
-    'export TERM=xterm-256color',
-    'export LANG=en_US.UTF-8',
-    'alias ll="ls -la"',
-    'alias la="ls -la"',
-    'alias l="ls -CF"'
-  ]
-};
-
-// Terminal capabilities detection
-export function detectTerminalCapabilities(): {
-  colors: number;
-  unicode: boolean;
-  mouse: boolean;
-  clipboard: boolean;
-  notifications: boolean;
-} {
-  return {
-    colors: 256, // Assume 256 color support
-    unicode: true,
-    mouse: 'onmousedown' in window,
-    clipboard: !!navigator.clipboard,
-    notifications: 'Notification' in window
-  };
-}
-
-// Performance monitoring
-export class TerminalPerformanceMonitor {
-  private startTime: number = 0;
-  private commandCount: number = 0;
-  private totalResponseTime: number = 0;
-  private errors: number = 0;
-
-  startCommand(): void {
-    this.startTime = performance.now();
-  }
-
-  endCommand(success: boolean): void {
-    if (this.startTime > 0) {
-      const responseTime = performance.now() - this.startTime;
-      this.totalResponseTime += responseTime;
-      this.commandCount++;
-      
-      if (!success) {
-        this.errors++;
-      }
-      
-      this.startTime = 0;
-    }
-  }
-
-  getMetrics() {
-    return {
-      commandsExecuted: this.commandCount,
-      averageResponseTime: this.commandCount > 0 ? this.totalResponseTime / this.commandCount : 0,
-      errorRate: this.commandCount > 0 ? (this.errors / this.commandCount) * 100 : 0,
-      totalResponseTime: this.totalResponseTime
-    };
-  }
-
-  reset(): void {
-    this.startTime = 0;
-    this.commandCount = 0;
-    this.totalResponseTime = 0;
-    this.errors = 0;
-  }
-}
-
-export const performanceMonitor = new TerminalPerformanceMonitor();

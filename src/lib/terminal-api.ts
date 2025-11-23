@@ -1,4 +1,4 @@
-// src/lib/terminal-api.ts
+// lib/terminal-api.ts
 /**
  * Terminal REST API wrapper - replaces WebSocket with polling
  * Works perfectly with Cloudflare Proxy
@@ -38,7 +38,7 @@ class TerminalAPI {
   private token: string = '';
 
   constructor() {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
       this.token = localStorage.getItem('auth_token') || '';
     }
   }
@@ -78,7 +78,7 @@ class TerminalAPI {
     command: string
   ): Promise<ApiResponse<TerminalOutput>> {
     try {
-      const response = await fetch(`${this.baseUrl}/${sessionId}/command`, {
+      const response = await fetch(`${this.baseUrl}/${sessionId}`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ command })
@@ -107,7 +107,7 @@ class TerminalAPI {
       }
 
       const response = await fetch(
-        `${this.baseUrl}/${sessionId}/output?${params}`,
+        `${this.baseUrl}/${sessionId}?${params}`,
         {
           method: 'GET',
           headers: this.getHeaders()
@@ -235,6 +235,9 @@ class TerminalAPI {
    */
   setToken(token: string): void {
     this.token = token;
+    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+      localStorage.setItem('auth_token', token);
+    }
   }
 }
 

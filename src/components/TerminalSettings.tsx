@@ -374,19 +374,6 @@ export default function TerminalSettings({
                       className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                     />
                   </label>
-
-                  <label className="flex items-center justify-between">
-                    <div className="flex items-center">
-                      <Monitor className="h-4 w-4 mr-2 text-gray-500" />
-                      <span className="text-sm text-gray-700">Paste with Middle Click</span>
-                    </div>
-                    <input
-                      type="checkbox"
-                      checked={config.pasteWithMiddleClick}
-                      onChange={(e) => handleConfigChange({ pasteWithMiddleClick: e.target.checked })}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                  </label>
                 </div>
               </div>
             </div>
@@ -472,27 +459,6 @@ export default function TerminalSettings({
                 <div className="flex justify-between text-xs text-gray-500 mt-1">
                   <span>100</span>
                   <span>5,000</span>
-                </div>
-              </div>
-
-              {/* Blocked Commands */}
-              <div>
-                <label className="form-label">Blocked Commands</label>
-                <div className="space-y-2">
-                  {securityPolicy.blockedCommands.map((command, index) => (
-                    <div key={index} className="flex items-center justify-between p-2 bg-red-50 rounded">
-                      <code className="text-sm text-red-700">{command}</code>
-                      <button
-                        onClick={() => {
-                          const newCommands = securityPolicy.blockedCommands.filter((_, i) => i !== index);
-                          handleSecurityPolicyChange({ blockedCommands: newCommands });
-                        }}
-                        className="text-red-600 hover:text-red-800"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </div>
-                  ))}
                 </div>
               </div>
             </div>

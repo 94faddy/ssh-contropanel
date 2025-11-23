@@ -1,4 +1,3 @@
-// src/app/api/terminal/[sessionId]/completions/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserFromToken } from '@/lib/auth';
 import { executeShellCommand } from '@/lib/ssh';
