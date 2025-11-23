@@ -1,3 +1,9 @@
+// src/hooks/useTerminalREST.ts
+/**
+ * Enhanced terminal hook using REST API with polling
+ * Replaces the WebSocket-based useTerminal hook
+ */
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { terminalAPI } from '@/lib/terminal-api';
 import type { 
@@ -14,23 +20,38 @@ export interface UseTerminalOptions {
   onConnect?: () => void;
   onDisconnect?: () => void;
   onError?: (error: string) => void;
-  pollInterval?: number;
+  pollInterval?: number; // milliseconds between polls (default: 1000)
 }
 
 export interface UseTerminalReturn {
+  // State
   state: TerminalState;
+  
+  // Actions
   connect: () => void;
   disconnect: () => void;
   executeCommand: (command: string) => void;
   clearTerminal: () => void;
+  
+  // Input handling
   currentCommand: string;
   setCurrentCommand: (command: string) => void;
   handleKeyDown: (e: React.KeyboardEvent) => void;
+  
+  // History
+  navigateHistory: (direction: 'up' | 'down') => void;
+  
+  // Tab completion
+  requestTabCompletion: () => void;
   tabCompletions: string[];
   showCompletions: boolean;
   applyCompletion: (completion: string) => void;
+  
+  // Utilities
   copyToClipboard: (text: string) => void;
   validateCommand: (command: string) => CommandValidation;
+  
+  // Refs
   terminalRef: React.RefObject<HTMLDivElement>;
   inputRef: React.RefObject<HTMLInputElement>;
 }
@@ -80,16 +101,19 @@ export function useTerminal({
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastOutputTimeRef = useRef<string>(new Date().toISOString());
 
+  // Update config when it changes
   useEffect(() => {
     configRef.current = { ...defaultConfig, ...config };
   }, [config]);
 
+  // Auto-scroll to bottom when new output is added
   useEffect(() => {
     if (terminalRef.current) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
     }
   }, [state.outputs]);
 
+  // Focus input when connected and not running command
   useEffect(() => {
     if (state.isConnected && !state.isCommandRunning && inputRef.current) {
       inputRef.current.focus();
@@ -121,12 +145,17 @@ export function useTerminal({
     lastOutputTimeRef.current = new Date().toISOString();
   }, []);
 
+  /**
+   * Start polling for new output
+   */
   const startPolling = useCallback((sessionId: string) => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
     }
 
     pollIntervalRef.current = setInterval(async () => {
+      if (!state.isConnected) return;
+
       const result = await terminalAPI.pollOutput(sessionId, lastOutputTimeRef.current);
       
       if (result.success && result.data) {
@@ -143,6 +172,7 @@ export function useTerminal({
             addOutput('system', `Command exited with code: ${output.exitCode}`);
           }
 
+          // Update current directory
           if (output.currentDir) {
             setState(prev => ({
               ...prev,
@@ -153,7 +183,7 @@ export function useTerminal({
         }
       }
     }, pollInterval);
-  }, [pollInterval, addOutput]);
+  }, [state.isConnected, addOutput, pollInterval]);
 
   const connect = useCallback(async () => {
     if (state.isConnecting || state.isConnected) return;
@@ -174,10 +204,12 @@ export function useTerminal({
       }));
 
       addOutput('system', `Connected to ${session.serverName}`);
-      addOutput('system', 'Welcome to SSH Terminal! Type your commands below.');
+      addOutput('system', 'Enhanced SSH Terminal ready! Type your commands below.');
       addOutput('system', `Working directory: ${session.currentDir}`);
       
+      // Start polling for output
       startPolling(session.sessionId);
+      
       onConnect?.();
     } else {
       addOutput('error', result.error || 'Failed to create session');
@@ -222,9 +254,11 @@ export function useTerminal({
     setShowCompletions(false);
     setTabCompletions([]);
 
-    const prompt = `${serverName}:${state.currentDirectory}$ `;
+    // Add command to output
+    const prompt = getPrompt();
     addOutput('input', `${prompt}${command}`);
 
+    // Send command to server
     const result = await terminalAPI.executeCommand(state.sessionId, command.trim());
 
     if (!result.success) {
@@ -233,7 +267,7 @@ export function useTerminal({
     }
 
     setCurrentCommand('');
-  }, [state.sessionId, state.isCommandRunning, state.currentDirectory, serverName, addOutput]);
+  }, [state.sessionId, state.isCommandRunning, addOutput]);
 
   const clearTerminal = useCallback(() => {
     setState(prev => ({ ...prev, outputs: [] }));
@@ -312,6 +346,7 @@ export function useTerminal({
       return;
     }
 
+    // Handle tab completions navigation
     if (showCompletions && tabCompletions.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -418,6 +453,14 @@ export function useTerminal({
     return { allowed: true, dangerous: false, requiresConfirmation: false };
   }, []);
 
+  const getPrompt = useCallback(() => {
+    const shortDir = state.currentDirectory.length > 20 
+      ? '...' + state.currentDirectory.slice(-17) 
+      : state.currentDirectory;
+    return `${serverName}:${shortDir}$ `;
+  }, [serverName, state.currentDirectory]);
+
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       disconnect();
@@ -433,6 +476,8 @@ export function useTerminal({
     currentCommand,
     setCurrentCommand,
     handleKeyDown,
+    navigateHistory,
+    requestTabCompletion,
     tabCompletions,
     showCompletions,
     applyCompletion,
