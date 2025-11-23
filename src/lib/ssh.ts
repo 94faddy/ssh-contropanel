@@ -7,7 +7,7 @@ import { postprocessOutput } from './command-middleware';
 // SSH connection pool
 const sshConnections = new Map<string, NodeSSH>();
 
-// Active shell sessions
+// Active shell sessions - ไม่ใช้ interactive shell
 const shellSessions = new Map<string, {
   ssh: NodeSSH;
   cwd: string;
@@ -144,7 +144,7 @@ export async function getSSHConnection(
   }
 }
 
-// Create shell session - SIMPLIFIED VERSION
+// ✅ FIXED: Create shell session WITHOUT allocating interactive PTY
 export async function createShellSession(
   serverId: number,
   userId: number,
@@ -159,24 +159,42 @@ export async function createShellSession(
 
     console.log(`[SSH] Got SSH connection for server ${serverId}`);
 
-    // Get initial working directory (single command, not Promise.all)
-    let cwd = '/root';
+    // ✅ STEP 1: Test SSH connection capability first
+    try {
+      const testResult = await ssh.execCommand('echo "SSH_OK"', [], {
+        execOptions: { timeout: 5000 }
+      });
+      
+      if (testResult.code !== 0) {
+        console.error('[SSH] SSH test command failed:', testResult.stderr);
+        return false;
+      }
+      console.log('[SSH] ✓ SSH connection test passed');
+    } catch (testError) {
+      console.error('[SSH] SSH test error:', testError);
+      return false;
+    }
+
+    // ✅ STEP 2: Get initial working directory
+    let cwd = '/';
     try {
       const pwdResult = await ssh.execCommand('pwd', [], {
         execOptions: { timeout: 5000 }
       });
+      
       if (pwdResult.code === 0) {
-        cwd = pwdResult.stdout.trim() || '/root';
-        console.log(`[SSH] Current directory: ${cwd}`);
+        const trimmedCwd = pwdResult.stdout.trim();
+        cwd = trimmedCwd || '/';
+        console.log(`[SSH] ✓ Current directory: ${cwd}`);
       } else {
         console.warn(`[SSH] pwd command failed with code ${pwdResult.code}`);
       }
     } catch (pwdError) {
       console.warn(`[SSH] Failed to get pwd:`, pwdError);
-      cwd = '/root';
+      cwd = '/';
     }
 
-    // Set up environment
+    // ✅ STEP 3: Setup environment
     const env: Record<string, string> = {
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
@@ -185,9 +203,9 @@ export async function createShellSession(
       DEBIAN_FRONTEND: 'noninteractive'
     };
 
-    console.log(`[SSH] Creating shell session with cwd=${cwd}`);
+    console.log(`[SSH] ✓ Environment variables configured`);
 
-    // Store shell session
+    // ✅ STEP 4: Store shell session (WITHOUT PTY allocation)
     shellSessions.set(sessionId, {
       ssh,
       cwd,
@@ -196,7 +214,7 @@ export async function createShellSession(
       serverId
     });
 
-    console.log(`[SSH] Shell session stored: sessionId=${sessionId}`);
+    console.log(`[SSH] ✓ Shell session created successfully: ${sessionId}`);
     return true;
   } catch (error) {
     console.error('[SSH] Failed to create shell session:', error);
@@ -204,7 +222,7 @@ export async function createShellSession(
   }
 }
 
-// Execute command in shell session
+// ✅ FIXED: Execute command WITHOUT PTY allocation
 export async function executeShellCommand(
   sessionId: string,
   command: string,
@@ -236,7 +254,7 @@ export async function executeShellCommand(
       };
     }
 
-    // Ensure proper environment is set for all commands
+    // ✅ Setup environment variables
     const envVars = {
       ...session.env,
       TERM: 'xterm-256color',
@@ -248,39 +266,49 @@ export async function executeShellCommand(
       LINES: '30'
     };
 
-    // Build environment string
+    // ✅ Build export environment commands
     const envString = Object.entries(envVars)
       .map(([key, value]) => `${key}="${value}"`)
       .join(' ');
 
-    // Prepare command with proper environment and directory
-    const fullCommand = `cd "${session.cwd}" && ${envString} ${command}`;
+    // ✅ Prepare command: cd to directory + set environment + run command
+    // NOT using PTY allocation (reason: channel open failure)
+    const fullCommand = `cd "${session.cwd}" && export ${envString} && ${command}`;
     
+    console.log(`[SSH] Executing: ${fullCommand.substring(0, 100)}...`);
+
+    // ✅ Use execCommand instead of requestShell (NO PTY!)
     const result = await session.ssh.execCommand(fullCommand, [], {
       execOptions: {
-        timeout: options.timeout || 30000,
-        env: envVars,
-        // Enable pseudo-TTY for better command support
-        pty: {
-          cols: 120,
-          rows: 30
-        }
+        timeout: options.timeout || 30000
+        // NO pty option - this was causing "Channel open failure"
       }
     });
 
-    // Update current working directory if command might have changed it
+    console.log(`[SSH] Command exited with code: ${result.code}`);
+
+    // ✅ Try to update current working directory if command changed it
     if (command.includes('cd ') || command.includes('pushd ') || command.includes('popd ')) {
       try {
-        const pwdResult = await session.ssh.execCommand(`cd "${session.cwd}" && ${command} && pwd`);
+        const pwdResult = await session.ssh.execCommand(
+          `cd "${session.cwd}" && pwd`,
+          [],
+          { execOptions: { timeout: 5000 } }
+        );
+        
         if (pwdResult.code === 0) {
-          session.cwd = pwdResult.stdout.trim() || session.cwd;
+          const newCwd = pwdResult.stdout.trim();
+          if (newCwd) {
+            session.cwd = newCwd;
+            console.log(`[SSH] Updated cwd to: ${newCwd}`);
+          }
         }
-      } catch {
-        // Ignore pwd update errors
+      } catch (pwdError) {
+        console.warn('[SSH] Failed to update pwd:', pwdError);
       }
     }
 
-    // Post-process output to remove warnings and clean up
+    // ✅ Post-process output
     const processedStdout = postprocessOutput(result.stdout, command);
     const processedStderr = postprocessOutput(result.stderr, command);
 
@@ -291,6 +319,7 @@ export async function executeShellCommand(
       cwd: session.cwd
     };
   } catch (error) {
+    console.error('[SSH] Command execution error:', error);
     throw error;
   }
 }

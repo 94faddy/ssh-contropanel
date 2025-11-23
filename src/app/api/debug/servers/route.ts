@@ -1,19 +1,23 @@
 // src/app/api/debug/servers/route.ts
-// ⚠️ TEMPORARY DEBUG ENDPOINT - ลบออกหลังเสร็จ
+// ✅ FIXED: Allow debug endpoint in development mode
 
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/database';
 
 export async function GET(request: NextRequest) {
   try {
-    // ตรวจสอบ authorization
+    // ✅ FIX: Allow in development mode without token
+    const isDevelopment = process.env.NODE_ENV !== 'production';
     const token = request.headers.get('authorization');
-    if (!token || !token.includes('Bearer')) {
+    
+    if (!isDevelopment && (!token || !token.includes('Bearer'))) {
       return NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
     }
+
+    console.log(`[DEBUG] Fetching all servers (${isDevelopment ? 'development mode' : 'production mode'})`);
 
     // ดึงทุก servers
     const servers = await prisma.server.findMany({
@@ -49,6 +53,8 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json({
+      success: true,
+      mode: isDevelopment ? 'development' : 'production',
       total: servers.length,
       servers: servers.map(s => ({
         id: s.id,
@@ -59,14 +65,19 @@ export async function GET(request: NextRequest) {
         hasPassword: !!s.password,
         isActive: s.isActive,
         status: s.status,
-        userId: s.userId
+        userId: s.userId,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt
       }))
     });
 
   } catch (error) {
     console.error('Debug error:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Unknown error' },
+      { 
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      },
       { status: 500 }
     );
   }

@@ -18,13 +18,16 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
 
   const [isMaximized, setIsMaximized] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [autoConnect, setAutoConnect] = useState(true);
+  const [connectedOnce, setConnectedOnce] = useState(false);
 
+  // ✅ Connect only once when component mounts
   useEffect(() => {
-    if (autoConnect && !terminal.state.isConnected && !terminal.state.isConnecting) {
+    if (!connectedOnce && !terminal.state.isConnected && !terminal.state.isConnecting) {
+      console.log('[TerminalREST] Connecting on mount...');
       terminal.connect();
+      setConnectedOnce(true);
     }
-  }, [autoConnect, terminal.state.isConnected, terminal.state.isConnecting, terminal]);
+  }, [connectedOnce, terminal]);
 
   const formatOutput = (output: TerminalOutputLine) => {
     const timestamp = output.timestamp.toLocaleTimeString();
@@ -104,13 +107,12 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
 
   const handleDisconnect = () => {
     terminal.disconnect();
-    setAutoConnect(false);
   };
 
   return (
     <>
-      <div className={`bg-white shadow-xl rounded-lg overflow-hidden transition-all duration-200 ${
-        isMaximized ? 'fixed inset-4 z-40 flex flex-col' : 'relative'
+      <div className={`bg-white shadow-xl rounded-lg overflow-hidden transition-all duration-200 flex flex-col ${
+        isMaximized ? 'fixed inset-4 z-40' : 'h-screen'
       }`}>
         {/* Header */}
         <div className="bg-gray-800 px-4 py-3 flex items-center justify-between flex-shrink-0">
@@ -130,11 +132,6 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
               {terminal.state.isConnecting && (
                 <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
                   Connecting...
-                </span>
-              )}
-              {terminal.state.isCommandRunning && (
-                <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                  Running...
                 </span>
               )}
             </div>
@@ -180,18 +177,12 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
         </div>
 
         {/* Terminal Content */}
-        <div className="bg-gray-900 flex-1 flex flex-col min-h-96 relative">
+        <div className="bg-gray-900 flex-1 flex flex-col overflow-hidden">
           {/* Output Area */}
           <div
             ref={terminal.terminalRef}
-            className="flex-1 overflow-y-auto p-4 space-y-1 custom-scrollbar"
+            className="flex-1 overflow-y-auto p-4 space-y-1"
           >
-            {terminal.state.isConnecting && (
-              <div className="text-yellow-400 font-mono text-sm">
-                Connecting to {serverName}...
-              </div>
-            )}
-            
             {terminal.state.outputs.map((output) => formatOutput(output))}
             
             {!terminal.state.isConnected && !terminal.state.isConnecting && (
@@ -208,30 +199,6 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
             )}
           </div>
 
-          {/* Tab Completions */}
-          {terminal.showCompletions && terminal.tabCompletions.length > 0 && (
-            <div className="bg-gray-800 border border-gray-600 rounded-md shadow-lg max-h-32 overflow-y-auto z-10 mx-4 mb-2">
-              {terminal.tabCompletions.map((completion, index) => {
-                const isSelected = index === -1;
-                return (
-                  <div
-                    key={`${completion}-${index}`}
-                    className={`px-3 py-1 font-mono text-xs cursor-pointer ${
-                      isSelected 
-                        ? 'bg-blue-600 text-white' 
-                        : 'text-gray-300 hover:bg-gray-700'
-                    }`}
-                    onClick={() => terminal.applyCompletion(completion)}
-                    role="option"
-                    aria-selected={isSelected}
-                  >
-                    {completion}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
           {/* Input Area */}
           {terminal.state.isConnected && (
             <div className="border-t border-gray-700 p-4 flex-shrink-0">
@@ -246,7 +213,7 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
                   onChange={(e) => terminal.setCurrentCommand(e.target.value)}
                   onKeyDown={terminal.handleKeyDown}
                   className="flex-1 bg-transparent text-green-400 font-mono outline-none text-sm"
-                  placeholder={terminal.state.isCommandRunning ? "Command is running..." : "Type your command here..."}
+                  placeholder="Type your command here..."
                   disabled={terminal.state.isCommandRunning}
                   autoComplete="off"
                   spellCheck={false}
@@ -264,7 +231,7 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
           <div className="bg-gray-800 px-4 py-2 text-xs text-gray-400 border-t border-gray-700 flex-shrink-0">
             <div className="flex justify-between items-center">
               <span>
-                Session: {terminal.state.sessionId?.substring(0, 8)}... | Dir: {terminal.state.currentDirectory}
+                {terminal.state.currentDirectory}
               </span>
               <button
                 onClick={handleDisconnect}
@@ -274,13 +241,6 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
                 Disconnect
               </button>
             </div>
-          </div>
-        )}
-
-        {/* Keyboard Help */}
-        {terminal.state.isConnected && (
-          <div className="bg-gray-700/30 px-4 py-1 text-xs text-gray-400 flex-shrink-0">
-            ↑↓ history | Tab completion | Ctrl+C interrupt | Ctrl+L clear
           </div>
         )}
       </div>

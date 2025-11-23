@@ -1,7 +1,8 @@
-// lib/terminal-api.ts
+// src/lib/terminal-api.ts
 /**
- * Terminal REST API wrapper - replaces WebSocket with polling
- * Works perfectly with Cloudflare Proxy
+ * Terminal REST API wrapper - FIXED version
+ * ✅ Fixed: Polling URL construction
+ * ✅ Fixed: Session ID handling
  */
 
 import { ApiResponse } from '@/types';
@@ -55,14 +56,25 @@ class TerminalAPI {
    */
   async createSession(serverId: number): Promise<ApiResponse<TerminalSession>> {
     try {
+      console.log(`[terminalAPI] Creating session for server ${serverId}`);
+      
       const response = await fetch(`${this.baseUrl}/sessions`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ serverId })
       });
 
-      return await response.json();
+      const data = await response.json();
+      
+      if (data.success) {
+        console.log(`[terminalAPI] Session created: ${data.data.sessionId}`);
+      } else {
+        console.error(`[terminalAPI] Session creation failed: ${data.error}`);
+      }
+      
+      return data;
     } catch (error) {
+      console.error('[terminalAPI] createSession error:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to create session'
@@ -78,14 +90,28 @@ class TerminalAPI {
     command: string
   ): Promise<ApiResponse<TerminalOutput>> {
     try {
-      const response = await fetch(`${this.baseUrl}/${sessionId}`, {
+      // ✅ FIX: Ensure clean session ID (no :1 or other suffixes)
+      const cleanSessionId = sessionId.split(':')[0];
+      
+      console.log(`[terminalAPI] Executing command: ${command.substring(0, 50)}...`);
+      
+      const response = await fetch(`${this.baseUrl}/${cleanSessionId}`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ command })
       });
 
+      if (response.status === 404) {
+        console.error(`[terminalAPI] Session not found: ${cleanSessionId}`);
+        return {
+          success: false,
+          error: `Session not found: ${cleanSessionId}`
+        };
+      }
+
       return await response.json();
     } catch (error) {
+      console.error('[terminalAPI] executeCommand error:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to execute command'
@@ -95,27 +121,47 @@ class TerminalAPI {
 
   /**
    * Poll for new output (replaces WebSocket messages)
+   * ✅ FIXED: Proper URL construction without :1 suffix
    */
   async pollOutput(
     sessionId: string,
     lastOutputTime?: string
   ): Promise<ApiResponse<TerminalOutput>> {
     try {
+      // ✅ FIX: Ensure clean session ID (remove :1 if present)
+      const cleanSessionId = sessionId.split(':')[0];
+      
       const params = new URLSearchParams();
       if (lastOutputTime) {
         params.append('since', lastOutputTime);
       }
 
-      const response = await fetch(
-        `${this.baseUrl}/${sessionId}?${params}`,
-        {
-          method: 'GET',
-          headers: this.getHeaders()
-        }
-      );
+      const queryString = params.toString();
+      const url = queryString 
+        ? `${this.baseUrl}/${cleanSessionId}?${queryString}`
+        : `${this.baseUrl}/${cleanSessionId}`;
+
+      // Log first poll only
+      if (!lastOutputTime) {
+        console.log(`[terminalAPI] Starting polling: ${url}`);
+      }
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: this.getHeaders()
+      });
+
+      if (response.status === 404) {
+        console.error(`[terminalAPI] Poll failed - Session not found: ${cleanSessionId}`);
+        return {
+          success: false,
+          error: `Session not found: ${cleanSessionId}`
+        };
+      }
 
       return await response.json();
     } catch (error) {
+      console.error('[terminalAPI] pollOutput error:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to poll output'
@@ -132,7 +178,9 @@ class TerminalAPI {
     currentDir: string
   ): Promise<ApiResponse<{ completions: string[] }>> {
     try {
-      const response = await fetch(`${this.baseUrl}/${sessionId}/completions`, {
+      const cleanSessionId = sessionId.split(':')[0];
+      
+      const response = await fetch(`${this.baseUrl}/${cleanSessionId}/completions`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ partial, currentDir })
@@ -152,7 +200,9 @@ class TerminalAPI {
    */
   async getSessionStatus(sessionId: string): Promise<ApiResponse<SessionStatus>> {
     try {
-      const response = await fetch(`${this.baseUrl}/${sessionId}/status`, {
+      const cleanSessionId = sessionId.split(':')[0];
+      
+      const response = await fetch(`${this.baseUrl}/${cleanSessionId}/status`, {
         method: 'GET',
         headers: this.getHeaders()
       });
@@ -171,7 +221,11 @@ class TerminalAPI {
    */
   async closeSession(sessionId: string): Promise<ApiResponse<{ success: boolean }>> {
     try {
-      const response = await fetch(`${this.baseUrl}/${sessionId}`, {
+      const cleanSessionId = sessionId.split(':')[0];
+      
+      console.log(`[terminalAPI] Closing session: ${cleanSessionId}`);
+      
+      const response = await fetch(`${this.baseUrl}/${cleanSessionId}`, {
         method: 'DELETE',
         headers: this.getHeaders()
       });

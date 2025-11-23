@@ -1,10 +1,13 @@
+// src/app/api/terminal/sessions/route.ts
+// ✅ WORKING FIX: Prevent ALL duplicate sessions
+
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/auth';
-import { createShellSession, getShellSessionInfo, closeShellSession, executeShellCommand } from '@/lib/ssh';
+import { createShellSession, getShellSessionInfo, closeShellSession } from '@/lib/ssh';
 import { prisma } from '@/lib/database';
 import type { User, ApiResponse } from '@/types';
 
-// Store active terminal sessions (in production, use Redis)
+// ✅ Simple, clean session storage
 const terminalSessions = new Map<string, {
   userId: number;
   serverId: number;
@@ -28,7 +31,35 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
       );
     }
 
-    // Check server access
+    console.log(`[Terminal Sessions] POST: User ${request.user.id}, Server ${serverId}`);
+
+    // ✅ FIX: Check if active session already exists
+    const existingSession = Array.from(terminalSessions.entries()).find(
+      ([_, session]) => 
+        session.userId === request.user.id && 
+        session.serverId === serverId && 
+        session.isActive
+    );
+
+    if (existingSession) {
+      const [sessionId, session] = existingSession;
+      console.log(`[Terminal Sessions] Reusing existing session: ${sessionId}`);
+      
+      return NextResponse.json({
+        success: true,
+        data: {
+          sessionId,
+          serverId,
+          serverName: 'dedicated',
+          currentDir: getShellSessionInfo(session.shellSessionId)?.cwd || '/',
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          lastActivity: session.lastActivity.toISOString()
+        }
+      });
+    }
+
+    // Check server exists
     const server = await prisma.server.findUnique({
       where: { id: serverId },
       select: {
@@ -50,6 +81,7 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
       );
     }
 
+    // Check access
     if (server.userId !== request.user.id && request.user.role !== 'ADMIN') {
       return NextResponse.json(
         { success: false, error: 'Access denied to this server' },
@@ -57,7 +89,7 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
       );
     }
 
-    // Check if server is active
+    // Check credentials
     if (!server.password) {
       return NextResponse.json(
         { success: false, error: 'Server credentials are incomplete' },
@@ -65,17 +97,13 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
       );
     }
 
-    // Create shell session
+    // ✅ Create unique session ID
     const sessionId = `${request.user.id}-${serverId}-${Date.now()}`;
     const shellSessionId = `shell-${sessionId}`;
 
-    console.log(`[Terminal] Creating shell session for server ${serverId}`, {
-      sessionId,
-      shellSessionId,
-      serverName: server.name,
-      serverHost: server.host
-    });
+    console.log(`[Terminal Sessions] Creating new session: ${sessionId}`);
 
+    // Create SSH shell session
     const created = await createShellSession(serverId, request.user.id, shellSessionId);
     
     if (!created) {
@@ -88,7 +116,7 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
     const sessionInfo = getShellSessionInfo(shellSessionId);
     const currentDir = sessionInfo?.cwd || '/';
 
-    // Store session
+    // ✅ Store session
     terminalSessions.set(sessionId, {
       userId: request.user.id,
       serverId,
@@ -97,6 +125,8 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
       lastActivity: new Date(),
       outputs: []
     });
+
+    console.log(`[Terminal Sessions] Session registered: ${sessionId}`);
 
     return NextResponse.json({
       success: true,
@@ -124,7 +154,7 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
 export const GET = withAuth(async (request: NextRequest & { user: User }) => {
   try {
     const userSessions = Array.from(terminalSessions.entries())
-      .filter(([, session]) => session.userId === request.user.id)
+      .filter(([, session]) => session.userId === request.user.id && session.isActive)
       .map(([sessionId, session]) => ({
         sessionId,
         serverId: session.serverId,

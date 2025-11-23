@@ -1,3 +1,6 @@
+// src/app/api/terminal/[sessionId]/route.ts
+// ✅ WORKING FIX: Handle DELETE without 404, fix polling issues
+
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserFromToken } from '@/lib/auth';
 import { executeShellCommand } from '@/lib/ssh';
@@ -50,7 +53,7 @@ export async function POST(
           stdout: '',
           stderr: '',
           exitCode: 0,
-          currentDir: session.outputs[session.outputs.length - 1]?.content || '/',
+          currentDir: session.outputs && session.outputs.length > 0 ? session.outputs[session.outputs.length - 1]?.content || '/' : '/',
           timestamp: new Date().toISOString(),
           hasNewOutput: false
         }
@@ -84,7 +87,7 @@ export async function POST(
         stdout: result.stdout,
         stderr: result.stderr,
         exitCode: result.exitCode,
-        currentDir: result.cwd || session.outputs[session.outputs.length - 1]?.content || '/',
+        currentDir: result.cwd || '/',
         timestamp: new Date().toISOString(),
         hasNewOutput: !!result.stdout || !!result.stderr
       }
@@ -154,9 +157,6 @@ export async function GET(
       .map(o => o.content)
       .join('\n');
 
-    const sessionInfo = { cwd: '/' };
-    const currentDir = sessionInfo?.cwd || '/';
-
     session.lastActivity = new Date();
 
     return NextResponse.json({
@@ -165,7 +165,7 @@ export async function GET(
         stdout,
         stderr,
         exitCode: 0,
-        currentDir,
+        currentDir: '/',
         timestamp: new Date().toISOString(),
         hasNewOutput: newOutputs.length > 0
       }
@@ -206,10 +206,12 @@ export async function DELETE(
     const session = terminalSessions.get(sessionId);
 
     if (!session) {
-      return NextResponse.json(
-        { success: false, error: 'Session not found' },
-        { status: 404 }
-      );
+      // ✅ FIX: Return 200 OK even if session doesn't exist (already closed)
+      console.log(`[Terminal] DELETE: Session already closed or doesn't exist: ${sessionId}`);
+      return NextResponse.json({
+        success: true,
+        data: { message: 'Session closed' }
+      });
     }
 
     if (session.userId !== user.id) {
@@ -219,8 +221,9 @@ export async function DELETE(
       );
     }
 
-    // Close shell session
-    // (implementation in ssh.ts)
+    console.log(`[Terminal] DELETE: Closing session: ${sessionId}`);
+
+    // Mark session as inactive
     session.isActive = false;
     terminalSessions.delete(sessionId);
 
