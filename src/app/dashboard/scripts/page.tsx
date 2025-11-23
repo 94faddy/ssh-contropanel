@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Play, Square, Search, Filter, Loader, CheckCircle, XCircle, Clock } from 'lucide-react';
-import { io, Socket } from 'socket.io-client';
+import { Play, Square, Search, Filter, Loader, CheckCircle, XCircle, Clock, RefreshCw } from 'lucide-react';
 import Swal from 'sweetalert2';
 import Layout from '@/components/Layout';
 import { formatRelativeTime, formatDuration } from '@/lib/utils';
@@ -28,20 +27,28 @@ export default function ScriptsPage() {
   const [executions, setExecutions] = useState<ScriptExecution[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [loading, setLoading] = useState(true);
+  const [pollInterval, setPollInterval] = useState<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     fetchServers();
-    initializeSocket();
     return () => {
-      if (socket) {
-        socket.disconnect();
-      }
+      if (pollInterval) clearInterval(pollInterval);
     };
   }, []);
+
+  // Poll for execution status
+  useEffect(() => {
+    if (isRunning && currentExecutionId) {
+      const interval = setInterval(() => {
+        pollExecutionStatus(currentExecutionId!);
+      }, 1000);
+      setPollInterval(interval);
+      return () => clearInterval(interval);
+    }
+  }, [isRunning, currentExecutionId]);
 
   const fetchServers = async () => {
     try {
@@ -65,92 +72,66 @@ export default function ScriptsPage() {
     }
   };
 
-  const initializeSocket = () => {
-    const token = localStorage.getItem('auth_token');
-    if (!token) return;
-
-    const newSocket = io(`${window.location.protocol}//${window.location.hostname}:3001`, {
-      auth: { token },
-      transports: ['websocket', 'polling']
-    });
-
-    newSocket.on('connect', () => {
-      console.log('WebSocket connected for scripts');
-      setSocket(newSocket);
-    });
-
-    newSocket.on('script:started', (data: { 
-      executionId: string; 
-      serverCount: number;
-      servers: { id: number; name: string }[];
-    }) => {
-      setCurrentExecutionId(data.executionId);
-      // Initialize executions for each server
-      const newExecutions: ScriptExecution[] = data.servers.map(server => ({
-        id: `${data.executionId}-${server.id}`,
-        serverId: server.id,
-        serverName: server.name,
-        status: 'running',
-        output: '',
-        startTime: new Date(),
-        progress: 0
-      }));
-      setExecutions(newExecutions);
-    });
-
-    newSocket.on('script:progress', (data: {
-      executionId: string;
-      serverId: number;
-      serverName: string;
-      status: 'running' | 'success' | 'failed';
-      output?: string;
-      error?: string;
-      exitCode?: number;
-    }) => {
-      setExecutions(prev => prev.map(exec => 
-        exec.serverId === data.serverId ? {
-          ...exec,
-          status: data.status,
-          output: data.output || exec.output,
-          error: data.error,
-          endTime: data.status !== 'running' ? new Date() : exec.endTime,
-          progress: data.status !== 'running' ? 100 : 50
-        } : exec
-      ));
-    });
-
-    newSocket.on('script:completed', (data: {
-      executionId: string;
-      totalServers: number;
-      successCount: number;
-      failedCount: number;
-    }) => {
-      setIsRunning(false);
-      setCurrentExecutionId(null);
-      
-      Swal.fire({
-        title: 'Script Execution Complete',
-        text: `Completed on ${data.totalServers} servers. ${data.successCount} successful, ${data.failedCount} failed.`,
-        icon: data.failedCount === 0 ? 'success' : 'warning',
-        confirmButtonText: 'OK'
+  const pollExecutionStatus = async (executionId: string) => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await fetch(`/api/scripts/execution/${executionId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
       });
-    });
 
-    newSocket.on('script:error', (data: { error: string }) => {
-      setIsRunning(false);
-      setCurrentExecutionId(null);
-      
-      Swal.fire({
-        title: 'Script Execution Error',
-        text: data.error,
-        icon: 'error'
-      });
-    });
+      if (response.ok) {
+        const data = await response.json();
+        
+        if (data.data) {
+          const execution = data.data;
+          
+          // Update executions with new results
+          if (execution.results && Array.isArray(execution.results)) {
+            setExecutions(execution.results.map((result: any) => ({
+              id: `${executionId}-${result.serverId}`,
+              serverId: result.serverId,
+              serverName: result.serverName || `Server ${result.serverId}`,
+              status: result.exitCode === 0 ? 'success' : 'failed',
+              output: result.stdout || '',
+              error: result.stderr,
+              startTime: new Date(),
+              endTime: new Date(),
+              progress: 100
+            })));
+          }
 
-    newSocket.on('disconnect', () => {
-      console.log('WebSocket disconnected');
-      setSocket(null);
-    });
+          // Check if execution is complete
+          if (execution.status === 'completed' || execution.status === 'failed') {
+            setIsRunning(false);
+            setCurrentExecutionId(null);
+            
+            if (pollInterval) {
+              clearInterval(pollInterval);
+              setPollInterval(null);
+            }
+
+            // Show completion message
+            if (execution.status === 'completed') {
+              await Swal.fire({
+                title: 'Script Execution Complete',
+                html: `
+                  <div class="text-left">
+                    <p>Completed on ${execution.totalServers} servers</p>
+                    <p class="text-green-600 font-bold">${execution.completedServers} successful</p>
+                    <p class="text-red-600 font-bold">${execution.totalServers - execution.completedServers} failed</p>
+                  </div>
+                `,
+                icon: execution.completedServers === execution.totalServers ? 'success' : 'warning'
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to poll execution status:', error);
+    }
   };
 
   const handleServerToggle = (serverId: number) => {
@@ -201,7 +182,6 @@ export default function ScriptsPage() {
       return false;
     }
 
-    // Security check for dangerous commands
     const dangerousCommands = [
       'rm -rf /',
       'rm -rf *',
@@ -227,7 +207,7 @@ export default function ScriptsPage() {
   };
 
   const runScript = async () => {
-    if (!validateScript() || !socket) return;
+    if (!validateScript()) return;
 
     const result = await Swal.fire({
       title: 'Confirm Script Execution',
@@ -240,23 +220,69 @@ export default function ScriptsPage() {
       cancelButtonText: 'Cancel'
     });
 
-    if (result.isConfirmed) {
-      setIsRunning(true);
-      setExecutions([]);
+    if (!result.isConfirmed) return;
 
-      socket.emit('script:run', {
-        scriptName: scriptName.trim(),
-        command: command.trim(),
-        serverIds: selectedServers
+    setIsRunning(true);
+    setExecutions([]);
+
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await fetch('/api/scripts/run', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          scriptName: scriptName.trim(),
+          command: command.trim(),
+          serverIds: selectedServers
+        })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setCurrentExecutionId(data.data.executionId);
+        
+        // Initialize executions
+        const newExecutions: ScriptExecution[] = selectedServers.map(serverId => {
+          const server = servers.find(s => s.id === serverId);
+          return {
+            id: `${data.data.executionId}-${serverId}`,
+            serverId,
+            serverName: server?.name || `Server ${serverId}`,
+            status: 'running',
+            output: '',
+            startTime: new Date(),
+            progress: 0
+          };
+        });
+        setExecutions(newExecutions);
+      } else {
+        setIsRunning(false);
+        Swal.fire({
+          title: 'Execution Failed',
+          text: data.error || 'Failed to execute script',
+          icon: 'error'
+        });
+      }
+    } catch (error) {
+      setIsRunning(false);
+      Swal.fire({
+        title: 'Error',
+        text: 'Failed to execute script',
+        icon: 'error'
       });
     }
   };
 
   const cancelScript = () => {
-    if (socket && currentExecutionId) {
-      socket.emit('script:cancel', { executionId: currentExecutionId });
-      setIsRunning(false);
-      setCurrentExecutionId(null);
+    setIsRunning(false);
+    setCurrentExecutionId(null);
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      setPollInterval(null);
     }
   };
 
@@ -534,7 +560,7 @@ systemctl restart nginx"
                     {selectedServers.length} server{selectedServers.length !== 1 ? 's' : ''} selected
                   </div>
                   <div className="text-xs text-blue-700 mt-1">
-                    Scripts will execute simultaneously on all selected servers
+                    Scripts will execute sequentially on selected servers
                   </div>
                 </div>
               )}

@@ -175,8 +175,7 @@ export default function ServersPage() {
   };
 
   const handleTerminal = (serverId: number) => {
-    // Navigate to terminal page with server ID
-    window.open(`/dashboard/terminal?server=${serverId}`, '_blank');
+    window.location.href = `/dashboard/terminal?server=${serverId}`;
   };
 
   const handleModalClose = () => {
@@ -228,7 +227,6 @@ export default function ServersPage() {
         {/* Filters */}
         <div className="mb-6 bg-white shadow-sm rounded-lg p-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            {/* Search */}
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
               <input
@@ -239,7 +237,6 @@ export default function ServersPage() {
               />
             </div>
 
-            {/* Status Filter */}
             <select
               value={filter.status || ''}
               onChange={(e) => handleFilterChange('status', e.target.value || undefined)}
@@ -251,7 +248,6 @@ export default function ServersPage() {
               <option value="ERROR">ข้อผิดพลาด</option>
             </select>
 
-            {/* Sort By */}
             <select
               value={filter.sortBy}
               onChange={(e) => handleFilterChange('sortBy', e.target.value)}
@@ -263,7 +259,6 @@ export default function ServersPage() {
               <option value="lastChecked">เรียงตามการตรวจสอบ</option>
             </select>
 
-            {/* Sort Order */}
             <select
               value={filter.sortOrder}
               onChange={(e) => handleFilterChange('sortOrder', e.target.value)}
