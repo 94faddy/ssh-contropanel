@@ -1,11 +1,20 @@
+// src/app/api/terminal/[sessionId]/status/route.ts
+/**
+ * Terminal session status endpoint
+ */
+
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserFromToken } from '@/lib/auth';
 import { getShellSessionInfo } from '@/lib/ssh';
 import { terminalSessions } from '../../sessions/route';
 
+interface RouteParams {
+  params: { sessionId: string };
+}
+
 export async function GET(
   request: NextRequest,
-  { params }: { params: { sessionId: string } }
+  { params }: RouteParams
 ) {
   try {
     const token = request.headers.get('authorization')?.replace('Bearer ', '');
@@ -55,7 +64,7 @@ export async function GET(
     });
 
   } catch (error) {
-    console.error('Get status error:', error);
+    console.error('[Terminal] Status error:', error);
     return NextResponse.json(
       { success: false, error: 'Failed to get status' },
       { status: 500 }

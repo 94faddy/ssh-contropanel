@@ -1,14 +1,25 @@
 // src/app/api/terminal/[sessionId]/route.ts
-// ✅ WORKING FIX: Handle DELETE without 404, fix polling issues
+/**
+ * Terminal session route - GET (poll), POST (execute), DELETE (close)
+ * ✅ Fixed: Proper route handling for dynamic sessionId
+ */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserFromToken } from '@/lib/auth';
-import { executeShellCommand } from '@/lib/ssh';
+import { executeShellCommand, getShellSessionInfo, closeShellSession } from '@/lib/ssh';
 import { terminalSessions } from '../sessions/route';
+import type { ApiResponse } from '@/types';
 
-export async function POST(
+interface RouteParams {
+  params: { sessionId: string };
+}
+
+/**
+ * GET - Poll for terminal output
+ */
+export async function GET(
   request: NextRequest,
-  { params }: { params: { sessionId: string } }
+  { params }: RouteParams
 ) {
   try {
     const token = request.headers.get('authorization')?.replace('Bearer ', '');
@@ -31,8 +42,90 @@ export async function POST(
     const session = terminalSessions.get(sessionId);
 
     if (!session || !session.isActive) {
+      console.log(`[Terminal] GET: Session not found or inactive: ${sessionId}`);
       return NextResponse.json(
-        { success: false, error: 'Session not found or inactive' },
+        { success: false, error: 'Session not found' },
+        { status: 404 }
+      );
+    }
+
+    if (session.userId !== user.id) {
+      return NextResponse.json(
+        { success: false, error: 'Access denied' },
+        { status: 403 }
+      );
+    }
+
+    // Get outputs since last poll
+    const since = request.nextUrl.searchParams.get('since');
+    const sinceTime = since ? new Date(since) : new Date(Date.now() - 2000);
+
+    const newOutputs = session.outputs.filter(o => o.timestamp > sinceTime);
+
+    const stdout = newOutputs
+      .filter(o => o.type === 'stdout')
+      .map(o => o.content)
+      .join('\n');
+
+    const stderr = newOutputs
+      .filter(o => o.type === 'stderr')
+      .map(o => o.content)
+      .join('\n');
+
+    session.lastActivity = new Date();
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        stdout,
+        stderr,
+        exitCode: 0,
+        currentDir: getShellSessionInfo(session.shellSessionId)?.cwd || '/',
+        timestamp: new Date().toISOString(),
+        hasNewOutput: newOutputs.length > 0
+      }
+    });
+
+  } catch (error) {
+    console.error('[Terminal] GET error:', error);
+    return NextResponse.json(
+      { success: false, error: 'Failed to get output' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * POST - Execute command in session
+ */
+export async function POST(
+  request: NextRequest,
+  { params }: RouteParams
+) {
+  try {
+    const token = request.headers.get('authorization')?.replace('Bearer ', '');
+    if (!token) {
+      return NextResponse.json(
+        { success: false, error: 'No token provided' },
+        { status: 401 }
+      );
+    }
+
+    const user = await getUserFromToken(token);
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid token' },
+        { status: 401 }
+      );
+    }
+
+    const sessionId = params.sessionId;
+    const session = terminalSessions.get(sessionId);
+
+    if (!session || !session.isActive) {
+      console.log(`[Terminal] POST: Session not found or inactive: ${sessionId}`);
+      return NextResponse.json(
+        { success: false, error: 'Session not found' },
         { status: 404 }
       );
     }
@@ -53,7 +146,7 @@ export async function POST(
           stdout: '',
           stderr: '',
           exitCode: 0,
-          currentDir: session.outputs && session.outputs.length > 0 ? session.outputs[session.outputs.length - 1]?.content || '/' : '/',
+          currentDir: getShellSessionInfo(session.shellSessionId)?.cwd || '/',
           timestamp: new Date().toISOString(),
           hasNewOutput: false
         }
@@ -94,96 +187,23 @@ export async function POST(
     });
 
   } catch (error) {
-    console.error('Execute command error:', error);
+    console.error('[Terminal] POST error:', error);
     return NextResponse.json(
-      { success: false, error: error instanceof Error ? error.message : 'Failed to execute command' },
+      { 
+        success: false, 
+        error: error instanceof Error ? error.message : 'Failed to execute command' 
+      },
       { status: 500 }
     );
   }
 }
 
-// GET output (polling)
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { sessionId: string } }
-) {
-  try {
-    const token = request.headers.get('authorization')?.replace('Bearer ', '');
-    if (!token) {
-      return NextResponse.json(
-        { success: false, error: 'No token provided' },
-        { status: 401 }
-      );
-    }
-
-    const user = await getUserFromToken(token);
-    if (!user) {
-      return NextResponse.json(
-        { success: false, error: 'Invalid token' },
-        { status: 401 }
-      );
-    }
-
-    const sessionId = params.sessionId;
-    const session = terminalSessions.get(sessionId);
-
-    if (!session || !session.isActive) {
-      return NextResponse.json(
-        { success: false, error: 'Session not found or inactive' },
-        { status: 404 }
-      );
-    }
-
-    if (session.userId !== user.id) {
-      return NextResponse.json(
-        { success: false, error: 'Access denied' },
-        { status: 403 }
-      );
-    }
-
-    // Get outputs since last poll
-    const since = request.nextUrl.searchParams.get('since');
-    const sinceTime = since ? new Date(since) : new Date(Date.now() - 2000);
-
-    const newOutputs = session.outputs.filter(o => o.timestamp > sinceTime);
-
-    const stdout = newOutputs
-      .filter(o => o.type === 'stdout')
-      .map(o => o.content)
-      .join('\n');
-
-    const stderr = newOutputs
-      .filter(o => o.type === 'stderr')
-      .map(o => o.content)
-      .join('\n');
-
-    session.lastActivity = new Date();
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        stdout,
-        stderr,
-        exitCode: 0,
-        currentDir: '/',
-        timestamp: new Date().toISOString(),
-        hasNewOutput: newOutputs.length > 0
-      }
-    });
-
-  } catch (error) {
-    console.error('Poll output error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Failed to poll output' },
-      { status: 500 }
-    );
-  }
-}
-
-// DELETE - Close session
+/**
+ * DELETE - Close session
+ */
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { sessionId: string } }
+  { params }: RouteParams
 ) {
   try {
     const token = request.headers.get('authorization')?.replace('Bearer ', '');
@@ -206,7 +226,7 @@ export async function DELETE(
     const session = terminalSessions.get(sessionId);
 
     if (!session) {
-      // ✅ FIX: Return 200 OK even if session doesn't exist (already closed)
+      // ✅ Return 200 OK even if session doesn't exist
       console.log(`[Terminal] DELETE: Session already closed or doesn't exist: ${sessionId}`);
       return NextResponse.json({
         success: true,
@@ -223,7 +243,10 @@ export async function DELETE(
 
     console.log(`[Terminal] DELETE: Closing session: ${sessionId}`);
 
-    // Mark session as inactive
+    // Close SSH shell session
+    closeShellSession(session.shellSessionId);
+
+    // Mark session as inactive and remove
     session.isActive = false;
     terminalSessions.delete(sessionId);
 
@@ -233,10 +256,11 @@ export async function DELETE(
     });
 
   } catch (error) {
-    console.error('Close session error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Failed to close session' },
-      { status: 500 }
-    );
+    console.error('[Terminal] DELETE error:', error);
+    // Still return 200 even on error
+    return NextResponse.json({
+      success: true,
+      data: { message: 'Session close attempted' }
+    });
   }
 }

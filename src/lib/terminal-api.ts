@@ -1,8 +1,9 @@
 // src/lib/terminal-api.ts
 /**
  * Terminal REST API wrapper - FIXED version
- * ✅ Fixed: Polling URL construction
+ * ✅ Fixed: URL encoding issues
  * ✅ Fixed: Session ID handling
+ * ✅ Fixed: Poll response handling
  */
 
 import { ApiResponse } from '@/types';
@@ -90,26 +91,33 @@ class TerminalAPI {
     command: string
   ): Promise<ApiResponse<TerminalOutput>> {
     try {
-      // ✅ FIX: Ensure clean session ID (no :1 or other suffixes)
-      const cleanSessionId = sessionId.split(':')[0];
+      console.log(`[terminalAPI] Executing command in session ${sessionId.substring(0, 20)}...`);
       
-      console.log(`[terminalAPI] Executing command: ${command.substring(0, 50)}...`);
-      
-      const response = await fetch(`${this.baseUrl}/${cleanSessionId}`, {
+      const response = await fetch(`${this.baseUrl}/${encodeURIComponent(sessionId)}`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify({ command })
       });
 
       if (response.status === 404) {
-        console.error(`[terminalAPI] Session not found: ${cleanSessionId}`);
+        console.error(`[terminalAPI] Session not found: ${sessionId}`);
         return {
           success: false,
-          error: `Session not found: ${cleanSessionId}`
+          error: `Session not found`
         };
       }
 
-      return await response.json();
+      if (!response.ok) {
+        const error = await response.text();
+        console.error(`[terminalAPI] Execute command failed:`, error);
+        return {
+          success: false,
+          error: `Request failed: ${response.status}`
+        };
+      }
+
+      const data = await response.json();
+      return data;
     } catch (error) {
       console.error('[terminalAPI] executeCommand error:', error);
       return {
@@ -120,31 +128,24 @@ class TerminalAPI {
   }
 
   /**
-   * Poll for new output (replaces WebSocket messages)
-   * ✅ FIXED: Proper URL construction without :1 suffix
+   * Poll for new output
+   * ✅ FIXED: Proper URL encoding and parameter handling
    */
   async pollOutput(
     sessionId: string,
     lastOutputTime?: string
   ): Promise<ApiResponse<TerminalOutput>> {
     try {
-      // ✅ FIX: Ensure clean session ID (remove :1 if present)
-      const cleanSessionId = sessionId.split(':')[0];
+      // Build URL with proper encoding
+      const encodedSessionId = encodeURIComponent(sessionId);
+      let url = `${this.baseUrl}/${encodedSessionId}`;
       
-      const params = new URLSearchParams();
       if (lastOutputTime) {
-        params.append('since', lastOutputTime);
+        const encodedTime = encodeURIComponent(lastOutputTime);
+        url += `?since=${encodedTime}`;
       }
 
-      const queryString = params.toString();
-      const url = queryString 
-        ? `${this.baseUrl}/${cleanSessionId}?${queryString}`
-        : `${this.baseUrl}/${cleanSessionId}`;
-
-      // Log first poll only
-      if (!lastOutputTime) {
-        console.log(`[terminalAPI] Starting polling: ${url}`);
-      }
+      console.log(`[terminalAPI] Polling: ${url.substring(0, 80)}...`);
 
       const response = await fetch(url, {
         method: 'GET',
@@ -152,14 +153,33 @@ class TerminalAPI {
       });
 
       if (response.status === 404) {
-        console.error(`[terminalAPI] Poll failed - Session not found: ${cleanSessionId}`);
+        console.error(`[terminalAPI] Poll: Session not found`);
         return {
           success: false,
-          error: `Session not found: ${cleanSessionId}`
+          error: `Session not found`
         };
       }
 
-      return await response.json();
+      if (!response.ok) {
+        console.error(`[terminalAPI] Poll failed: Status ${response.status}`);
+        return {
+          success: false,
+          error: `Request failed: ${response.status}`
+        };
+      }
+
+      const data = await response.json();
+      
+      // ✅ Handle success properly
+      if (data.success) {
+        return data;
+      } else {
+        // Don't log every poll error - too noisy
+        if (data.error && !data.error.includes('Session not found')) {
+          console.warn(`[terminalAPI] Poll response error:`, data.error);
+        }
+        return data;
+      }
     } catch (error) {
       console.error('[terminalAPI] pollOutput error:', error);
       return {
@@ -178,13 +198,23 @@ class TerminalAPI {
     currentDir: string
   ): Promise<ApiResponse<{ completions: string[] }>> {
     try {
-      const cleanSessionId = sessionId.split(':')[0];
+      const encodedSessionId = encodeURIComponent(sessionId);
       
-      const response = await fetch(`${this.baseUrl}/${cleanSessionId}/completions`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify({ partial, currentDir })
-      });
+      const response = await fetch(
+        `${this.baseUrl}/${encodedSessionId}/completions`,
+        {
+          method: 'POST',
+          headers: this.getHeaders(),
+          body: JSON.stringify({ partial, currentDir })
+        }
+      );
+
+      if (!response.ok) {
+        return {
+          success: false,
+          error: `Request failed: ${response.status}`
+        };
+      }
 
       return await response.json();
     } catch (error) {
@@ -200,12 +230,22 @@ class TerminalAPI {
    */
   async getSessionStatus(sessionId: string): Promise<ApiResponse<SessionStatus>> {
     try {
-      const cleanSessionId = sessionId.split(':')[0];
+      const encodedSessionId = encodeURIComponent(sessionId);
       
-      const response = await fetch(`${this.baseUrl}/${cleanSessionId}/status`, {
-        method: 'GET',
-        headers: this.getHeaders()
-      });
+      const response = await fetch(
+        `${this.baseUrl}/${encodedSessionId}/status`,
+        {
+          method: 'GET',
+          headers: this.getHeaders()
+        }
+      );
+
+      if (!response.ok) {
+        return {
+          success: false,
+          error: `Request failed: ${response.status}`
+        };
+      }
 
       return await response.json();
     } catch (error) {
@@ -221,17 +261,32 @@ class TerminalAPI {
    */
   async closeSession(sessionId: string): Promise<ApiResponse<{ success: boolean }>> {
     try {
-      const cleanSessionId = sessionId.split(':')[0];
+      const encodedSessionId = encodeURIComponent(sessionId);
       
-      console.log(`[terminalAPI] Closing session: ${cleanSessionId}`);
+      console.log(`[terminalAPI] Closing session: ${sessionId.substring(0, 20)}...`);
       
-      const response = await fetch(`${this.baseUrl}/${cleanSessionId}`, {
-        method: 'DELETE',
-        headers: this.getHeaders()
-      });
+      const response = await fetch(
+        `${this.baseUrl}/${encodedSessionId}`,
+        {
+          method: 'DELETE',
+          headers: this.getHeaders()
+        }
+      );
 
-      return await response.json();
+      if (!response.ok && response.status !== 404) {
+        console.error(`[terminalAPI] Close failed: Status ${response.status}`);
+        return {
+          success: false,
+          error: `Request failed: ${response.status}`
+        };
+      }
+
+      // Always return success, even if session doesn't exist
+      return {
+        success: true
+      };
     } catch (error) {
+      console.error('[terminalAPI] closeSession error:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to close session'

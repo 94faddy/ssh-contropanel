@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { X, Maximize2, Minimize2, RotateCcw, Copy, Settings } from 'lucide-react';
+import { X, Maximize2, Minimize2, RotateCcw, Copy, Settings, AlertCircle } from 'lucide-react';
 import { useTerminal } from '@/hooks/useTerminalREST';
 import TerminalSettings from './TerminalSettings';
+import Swal from 'sweetalert2';
 import type { TerminalProps, TerminalOutputLine } from '@/types';
 
 export default function TerminalREST({ serverId, serverName, onClose }: TerminalProps) {
@@ -12,7 +13,12 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
     serverName,
     pollInterval: 1000,
     onError: (error) => {
-      console.error('Terminal error:', error);
+      console.error('[TerminalREST] Terminal error:', error);
+      Swal.fire({
+        title: 'Terminal Error',
+        text: error,
+        icon: 'error'
+      });
     }
   });
 
@@ -23,11 +29,11 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
   // ✅ Connect only once when component mounts
   useEffect(() => {
     if (!connectedOnce && !terminal.state.isConnected && !terminal.state.isConnecting) {
-      console.log('[TerminalREST] Connecting on mount...');
+      console.log('[TerminalREST] Initiating connection on mount...');
       terminal.connect();
       setConnectedOnce(true);
     }
-  }, [connectedOnce, terminal]);
+  }, [connectedOnce, terminal.state.isConnected, terminal.state.isConnecting, terminal]);
 
   const formatOutput = (output: TerminalOutputLine) => {
     const timestamp = output.timestamp.toLocaleTimeString();
@@ -105,14 +111,28 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
     terminal.connect();
   };
 
-  const handleDisconnect = () => {
-    terminal.disconnect();
+  const handleDisconnect = async () => {
+    const result = await Swal.fire({
+      title: 'Disconnect?',
+      text: 'Are you sure you want to close this terminal session?',
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonColor: '#dc2626',
+      cancelButtonColor: '#6b7280',
+      confirmButtonText: 'Yes, disconnect',
+      cancelButtonText: 'No, keep connected'
+    });
+
+    if (result.isConfirmed) {
+      terminal.disconnect();
+      onClose();
+    }
   };
 
   return (
     <>
       <div className={`bg-white shadow-xl rounded-lg overflow-hidden transition-all duration-200 flex flex-col ${
-        isMaximized ? 'fixed inset-4 z-40' : 'h-screen'
+        isMaximized ? 'fixed inset-4 z-40' : 'h-full'
       }`}>
         {/* Header */}
         <div className="bg-gray-800 px-4 py-3 flex items-center justify-between flex-shrink-0">
@@ -126,12 +146,12 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
               Terminal - {serverName}
               {terminal.state.isConnected && (
                 <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                  Connected
+                  ✓ Connected
                 </span>
               )}
               {terminal.state.isConnecting && (
                 <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
-                  Connecting...
+                  ⟳ Connecting...
                 </span>
               )}
             </div>
@@ -183,20 +203,21 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
             ref={terminal.terminalRef}
             className="flex-1 overflow-y-auto p-4 space-y-1"
           >
-            {terminal.state.outputs.map((output) => formatOutput(output))}
-            
-            {!terminal.state.isConnected && !terminal.state.isConnecting && (
-              <div className="text-center py-8">
-                <div className="text-gray-400 mb-4">Not connected</div>
+            {terminal.state.outputs.length === 0 && !terminal.state.isConnected && !terminal.state.isConnecting && (
+              <div className="text-center py-8 text-gray-500">
+                <AlertCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                <div>Not connected to server</div>
                 <button
                   onClick={handleConnect}
-                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors text-sm"
+                  className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors text-sm"
                   type="button"
                 >
                   Connect
                 </button>
               </div>
             )}
+
+            {terminal.state.outputs.map((output) => formatOutput(output))}
           </div>
 
           {/* Input Area */}
@@ -221,6 +242,21 @@ export default function TerminalREST({ serverId, serverName, onClose }: Terminal
                 {terminal.state.isCommandRunning && (
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-400"></div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {!terminal.state.isConnected && terminal.state.outputs.length > 0 && (
+            <div className="border-t border-gray-700 p-4 flex-shrink-0 bg-gray-800/50">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400 text-sm">Connection closed</span>
+                <button
+                  onClick={handleConnect}
+                  className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors text-sm"
+                  type="button"
+                >
+                  Reconnect
+                </button>
               </div>
             </div>
           )}

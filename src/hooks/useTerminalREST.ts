@@ -2,6 +2,8 @@
 /**
  * Terminal hook - FINAL FIX
  * ✅ Prevents duplicate connect() calls
+ * ✅ Proper polling error handling
+ * ✅ Session validation
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -87,7 +89,13 @@ export function useTerminal({
   const configRef = useRef<TerminalConfig>({ ...defaultConfig, ...config });
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastOutputTimeRef = useRef<string>(new Date().toISOString());
-  const isConnectingRef = useRef(false);
+  
+  // ✅ FIX: Use ref to track connection state instead of relying on state
+  const connectionStateRef = useRef({
+    isConnecting: false,
+    sessionId: null as string | null,
+    isConnected: false
+  });
 
   useEffect(() => {
     configRef.current = { ...defaultConfig, ...config };
@@ -133,12 +141,21 @@ export function useTerminal({
   const startPolling = useCallback((sessionId: string) => {
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
     }
 
-    console.log(`[useTerminal] Starting polling: ${sessionId}`);
+    console.log(`[useTerminal] Starting polling for session: ${sessionId.substring(0, 30)}...`);
 
     pollIntervalRef.current = setInterval(async () => {
-      if (!state.isConnected) return;
+      // ✅ Check connection ref instead of state
+      if (!connectionStateRef.current.isConnected || !sessionId) {
+        console.log('[useTerminal] Polling stopped - not connected');
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+        return;
+      }
 
       const result = await terminalAPI.pollOutput(sessionId, lastOutputTimeRef.current);
       
@@ -161,31 +178,74 @@ export function useTerminal({
             }));
           }
         }
+      } else if (result.error) {
+        // ✅ Check if session not found
+        if (result.error.includes('not found')) {
+          console.warn('[useTerminal] Session not found, stopping polling');
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+          // Mark as disconnected
+          connectionStateRef.current.isConnected = false;
+          setState(prev => ({
+            ...prev,
+            isConnected: false,
+            isCommandRunning: false
+          }));
+          onError?.('Session closed on server');
+        }
+        // Otherwise just skip this poll cycle
       }
     }, pollInterval);
-  }, [state.isConnected, addOutput, pollInterval]);
+  }, [pollInterval, addOutput, onError]);
 
-  // ✅ CRITICAL FIX: Use useCallback with NO dependencies to prevent re-creation
+  // ✅ CRITICAL FIX: Prevent duplicate session creation
   const connect = useCallback(async () => {
-    // ✅ Check ref first (synchronous)
-    if (isConnectingRef.current) {
-      console.warn('[useTerminal] Already connecting, skipping...');
+    // ✅ Check if already connecting/connected
+    if (connectionStateRef.current.isConnecting || connectionStateRef.current.isConnected) {
+      console.warn('[useTerminal] Already connecting or connected, skipping...');
       return;
     }
     
     // ✅ Set immediately to block other calls
-    isConnectingRef.current = true;
+    connectionStateRef.current.isConnecting = true;
     setState(prev => ({ ...prev, isConnecting: true }));
     
     console.log(`[useTerminal] Starting connection to server ${serverId}`);
     
-    const result = await terminalAPI.createSession(serverId);
-    
-    if (result.success && result.data) {
+    try {
+      const result = await terminalAPI.createSession(serverId);
+      
+      if (!result.success) {
+        console.error('[useTerminal] Session creation failed:', result.error);
+        addOutput('error', result.error || 'Failed to create session');
+        setState(prev => ({ ...prev, isConnecting: false }));
+        onError?.(result.error || 'Failed to create session');
+        connectionStateRef.current.isConnecting = false;
+        return;
+      }
+
+      if (!result.data) {
+        console.error('[useTerminal] No session data returned');
+        addOutput('error', 'No session data returned');
+        setState(prev => ({ ...prev, isConnecting: false }));
+        onError?.('No session data returned');
+        connectionStateRef.current.isConnecting = false;
+        return;
+      }
+
       const session = result.data;
+      console.log(`[useTerminal] Session created successfully: ${session.sessionId}`);
       
-      console.log(`[useTerminal] Session created: ${session.sessionId}`);
-      
+      // ✅ Update ref BEFORE state to prevent race conditions
+      connectionStateRef.current = {
+        isConnecting: false,
+        sessionId: session.sessionId,
+        isConnected: true
+      };
+
+      // ✅ Then update state
       setState(prev => ({
         ...prev,
         isConnected: true,
@@ -194,20 +254,21 @@ export function useTerminal({
         currentDirectory: session.currentDir
       }));
 
-      addOutput('system', `Connected to ${session.serverName}`);
-      addOutput('system', 'Enhanced SSH Terminal ready! Type your commands below.');
-      addOutput('system', `Working directory: ${session.currentDir}`);
+      addOutput('system', `✓ Connected to ${session.serverName}`);
+      addOutput('system', '✓ Enhanced SSH Terminal ready! Type your commands below.');
+      addOutput('system', `✓ Working directory: ${session.currentDir}`);
       
+      // ✅ Start polling
       startPolling(session.sessionId);
-      
       onConnect?.();
-      isConnectingRef.current = false;
-    } else {
-      console.error('[useTerminal] Connection failed:', result.error);
-      addOutput('error', result.error || 'Failed to create session');
+      
+    } catch (error) {
+      console.error('[useTerminal] Connection error:', error);
+      const errorMsg = error instanceof Error ? error.message : 'Connection failed';
+      addOutput('error', errorMsg);
       setState(prev => ({ ...prev, isConnecting: false }));
-      onError?.(result.error || 'Connection failed');
-      isConnectingRef.current = false;
+      onError?.(errorMsg);
+      connectionStateRef.current.isConnecting = false;
     }
   }, [serverId, addOutput, onConnect, onError, startPolling]);
 
@@ -219,10 +280,19 @@ export function useTerminal({
       pollIntervalRef.current = null;
     }
 
-    if (state.sessionId) {
-      await terminalAPI.closeSession(state.sessionId);
+    const sessionId = connectionStateRef.current.sessionId;
+    if (sessionId) {
+      await terminalAPI.closeSession(sessionId).catch(err => {
+        console.error('[useTerminal] Error closing session:', err);
+      });
     }
     
+    connectionStateRef.current = {
+      isConnecting: false,
+      sessionId: null,
+      isConnected: false
+    };
+
     setState(prev => ({
       ...prev,
       isConnected: false,
@@ -231,9 +301,8 @@ export function useTerminal({
       isCommandRunning: false
     }));
 
-    isConnectingRef.current = false;
     onDisconnect?.();
-  }, [state.sessionId, onDisconnect]);
+  }, []);
 
   const executeCommand = useCallback(async (command: string) => {
     if (!command.trim() || !state.sessionId || state.isCommandRunning) return;
@@ -455,6 +524,7 @@ export function useTerminal({
     return `${serverName}:${shortDir}$ `;
   }, [serverName, state.currentDirectory]);
 
+  // ✅ Cleanup on unmount
   useEffect(() => {
     return () => {
       console.log('[useTerminal] Cleanup on unmount');

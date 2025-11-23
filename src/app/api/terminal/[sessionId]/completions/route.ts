@@ -1,11 +1,20 @@
+// src/app/api/terminal/[sessionId]/completions/route.ts
+/**
+ * Tab completion endpoint
+ */
+
 import { NextRequest, NextResponse } from 'next/server';
 import { getUserFromToken } from '@/lib/auth';
 import { executeShellCommand } from '@/lib/ssh';
 import { terminalSessions } from '../../sessions/route';
 
+interface RouteParams {
+  params: { sessionId: string };
+}
+
 export async function POST(
   request: NextRequest,
-  { params }: { params: { sessionId: string } }
+  { params }: RouteParams
 ) {
   try {
     const token = request.headers.get('authorization')?.replace('Bearer ', '');
@@ -102,7 +111,7 @@ export async function POST(
     }
 
   } catch (error) {
-    console.error('Tab completion error:', error);
+    console.error('[Terminal] Completions error:', error);
     return NextResponse.json(
       { success: false, error: 'Failed to get completions' },
       { status: 500 }
